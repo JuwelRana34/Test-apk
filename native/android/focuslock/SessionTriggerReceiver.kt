@@ -8,7 +8,6 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.PowerManager
-import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import java.util.Calendar
 
@@ -52,12 +51,16 @@ class SessionTriggerReceiver : BroadcastReceiver() {
                     if (!after(calendar)) add(Calendar.DATE, 1)
                 }
 
+                val now = System.currentTimeMillis()
+                val plannedDuration = (endCalendar.timeInMillis - now).coerceAtLeast(0L)
+
                 prefs.edit()
                     .putBoolean("IS_SESSION_ACTIVE", true)
                     .putString("LOCK_MODE", lockMode)
-                    .putLong("SESSION_START_TIME", System.currentTimeMillis())
+                    .putLong("SESSION_START_TIME", now)
                     .putLong("SESSION_END_TIME", endCalendar.timeInMillis)
-                    .apply()
+                    .putLong("SESSION_PLANNED_DURATION", plannedDuration)
+                    .commit()
 
                 FocusScheduler.scheduleAlarms(context)
 
@@ -111,14 +114,24 @@ class SessionTriggerReceiver : BroadcastReceiver() {
                 )
             } else if (action == "END_SESSION") {
                 val wasActive = prefs.getBoolean("IS_SESSION_ACTIVE", false)
+                val startTime = prefs.getLong("SESSION_START_TIME", 0L)
+                val plannedDuration = prefs.getLong("SESSION_PLANNED_DURATION", 0L)
+                val now = System.currentTimeMillis()
+                val actualElapsed = if (startTime > 0L) (now - startTime) else plannedDuration
+                val completedDuration = minOf(
+                    if (plannedDuration > 0L) plannedDuration else actualElapsed,
+                    actualElapsed
+                )
+
                 prefs.edit()
                     .putBoolean("IS_SESSION_ACTIVE", false)
                     .remove("SESSION_END_TIME")
                     .remove("SESSION_START_TIME")
-                    .apply()
+                    .remove("SESSION_PLANNED_DURATION")
+                    .commit()
 
                 if (wasActive) {
-                    FocusScheduler.recordSuccessfulLockDay(context)
+                    FocusScheduler.recordSuccessfulLockDay(context, completedDuration)
                 }
 
                 FocusScheduler.scheduleAlarms(context)
@@ -131,12 +144,6 @@ class SessionTriggerReceiver : BroadcastReceiver() {
                     Intent(FocusBlockerService.ACTION_STOP_SESSION)
                         .setPackage(context.packageName)
                 )
-
-                Toast.makeText(
-                    context,
-                    "🎉 লক সেশন সফলভাবে শেষ হয়েছে! (+Streak Progress)",
-                    Toast.LENGTH_LONG
-                ).show()
             }
         } catch (e: Exception) {
             e.printStackTrace()

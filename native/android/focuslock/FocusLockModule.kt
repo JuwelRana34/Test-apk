@@ -34,9 +34,16 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
         return "FocusLock"
     }
 
-    // =========================================================================
-    // 1. PERMISSION CHECKS & SETTINGS INTENTS (Accessibility, Overlay, Admin, Battery)
-    // =========================================================================
+    private fun saveAllowedAppsToPrefs(prefs: android.content.SharedPreferences, pkgSet: Set<String>) {
+        // Save as both CSV string and fresh StringSet so Android SharedPreferences never caches stale sets!
+        prefs.edit()
+            .remove("ALLOWED_APPS")
+            .apply()
+        prefs.edit()
+            .putStringSet("ALLOWED_APPS", HashSet(pkgSet))
+            .putString("ALLOWED_APPS_CSV", pkgSet.joinToString(","))
+            .commit()
+    }
 
     @ReactMethod
     fun isAccessibilityServiceEnabled(promise: Promise) {
@@ -168,10 +175,6 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
         }
     }
 
-    // =========================================================================
-    // 2. INSTALLED APPS & WHITELIST CONFIGURATION (MAX 6 APPS + CHROME DOMAINS)
-    // =========================================================================
-
     @ReactMethod
     fun getInstalledApps(promise: Promise) {
         try {
@@ -232,11 +235,11 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
             val appSet = HashSet<String>()
             val maxApps = minOf(apps.size(), 6)
             for (i in 0 until maxApps) {
-                val pkg = apps.getString(i)
-                if (pkg != null) appSet.add(pkg)
+                val pkg = apps.getString(i)?.trim()
+                if (!pkg.isNullOrEmpty()) appSet.add(pkg)
             }
             val prefs = reactApplicationContext.getSharedPreferences("FocusModePrefs", Context.MODE_PRIVATE)
-            prefs.edit().putStringSet("ALLOWED_APPS", appSet).apply()
+            saveAllowedAppsToPrefs(prefs, appSet)
             promise.resolve(true)
         } catch (e: Exception) {
             promise.reject("ERROR", e.message)
@@ -252,7 +255,12 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
                 if (!d.isNullOrEmpty()) domainSet.add(d)
             }
             val prefs = reactApplicationContext.getSharedPreferences("FocusModePrefs", Context.MODE_PRIVATE)
-            prefs.edit().putStringSet("ALLOWED_DOMAINS", domainSet).apply()
+            prefs.edit()
+                .remove("ALLOWED_DOMAINS")
+                .apply()
+            prefs.edit()
+                .putStringSet("ALLOWED_DOMAINS", domainSet)
+                .commit()
             promise.resolve(true)
         } catch (e: Exception) {
             promise.reject("ERROR", e.message)
@@ -263,7 +271,7 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
     fun setYouTubeLimitMinutes(limitMinutes: Int, promise: Promise) {
         try {
             val prefs = reactApplicationContext.getSharedPreferences("FocusModePrefs", Context.MODE_PRIVATE)
-            prefs.edit().putInt("YT_LIMIT_MINUTES", limitMinutes).apply()
+            prefs.edit().putInt("YT_LIMIT_MINUTES", limitMinutes).commit()
             promise.resolve(true)
         } catch (e: Exception) {
             promise.reject("ERROR", e.message)
@@ -273,8 +281,23 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
     @ReactMethod
     fun openApp(packageName: String, promise: Promise) {
         try {
+            val cleanPkg = packageName.trim()
+            val prefs = reactApplicationContext.getSharedPreferences("FocusModePrefs", Context.MODE_PRIVATE)
+
+            // 🌟 Ensure the opened app is registered in ALLOWED_APPS_CSV and set a 2.5s launch grace period!
+            val existingCsv = prefs.getString("ALLOWED_APPS_CSV", "") ?: ""
+            val updatedSet = existingCsv.split(",").map { it.trim() }.filter { it.isNotEmpty() }.toMutableSet()
+            updatedSet.add(cleanPkg)
+
+            prefs.edit()
+                .putString("LAST_LAUNCHED_ALLOWED_APP", cleanPkg)
+                .putLong("WHITELIST_GRACE_UNTIL", System.currentTimeMillis() + 2500L)
+                .putString("ALLOWED_APPS_CSV", updatedSet.joinToString(","))
+                .putStringSet("ALLOWED_APPS", HashSet(updatedSet))
+                .commit()
+
             val pm = reactApplicationContext.packageManager
-            val intent = pm.getLaunchIntentForPackage(packageName)
+            val intent = pm.getLaunchIntentForPackage(cleanPkg)
             if (intent != null) {
                 intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 reactApplicationContext.startActivity(intent)
@@ -286,10 +309,6 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
             promise.reject("ERROR", e.message)
         }
     }
-
-    // =========================================================================
-    // 3. SESSION LOCK (25m FOCUS + 5m BREAK) & SCHEDULE LOCK
-    // =========================================================================
 
     @ReactMethod
     fun startQuickFocus(
@@ -303,23 +322,25 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
             val pkgSet = HashSet<String>()
             val limit = minOf(allowedPackages.size(), 6)
             for (i in 0 until limit) {
-                val pkg = allowedPackages.getString(i)
-                if (pkg != null) pkgSet.add(pkg)
+                val pkg = allowedPackages.getString(i)?.trim()
+                if (!pkg.isNullOrEmpty()) pkgSet.add(pkg)
             }
 
             val prefs = reactApplicationContext.getSharedPreferences("FocusModePrefs", Context.MODE_PRIVATE)
             val now = System.currentTimeMillis()
             val sessionEndTime = now + (durationMinutes * 60 * 1000L)
 
+            saveAllowedAppsToPrefs(prefs, pkgSet)
+
             prefs.edit().apply {
                 putBoolean("IS_SESSION_ACTIVE", true)
                 putString("LOCK_MODE", "SESSION")
                 putBoolean("POMODORO_ENABLED", pomodoroEnabled)
-                putStringSet("ALLOWED_APPS", pkgSet)
                 putInt("YT_LIMIT_MINUTES", ytLimitMinutes)
                 putLong("SESSION_START_TIME", now)
                 putLong("SESSION_END_TIME", sessionEndTime)
-            }.apply()
+                putLong("SESSION_PLANNED_DURATION", durationMinutes * 60 * 1000L)
+            }.commit()
 
             val alarmManager = reactApplicationContext.getSystemService(Context.ALARM_SERVICE) as AlarmManager
             val endIntent = Intent(reactApplicationContext, SessionTriggerReceiver::class.java).apply {
@@ -366,6 +387,16 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
     ) {
         try {
             val prefs = reactApplicationContext.getSharedPreferences("FocusModePrefs", Context.MODE_PRIVATE)
+            if (allowedPackages != null) {
+                val pkgSet = HashSet<String>()
+                val limit = minOf(allowedPackages.size(), 6)
+                for (i in 0 until limit) {
+                    val pkg = allowedPackages.getString(i)?.trim()
+                    if (!pkg.isNullOrEmpty()) pkgSet.add(pkg)
+                }
+                saveAllowedAppsToPrefs(prefs, pkgSet)
+            }
+
             val editor = prefs.edit()
                 .putInt("START_HOUR", startHour)
                 .putInt("START_MINUTE", startMinute)
@@ -373,16 +404,6 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
                 .putInt("END_MINUTE", endMinute)
                 .putBoolean("IS_FOCUS_ENABLED", enabled)
                 .putInt("YT_LIMIT_MINUTES", ytLimitMinutes)
-
-            if (allowedPackages != null) {
-                val pkgSet = HashSet<String>()
-                val limit = minOf(allowedPackages.size(), 6)
-                for (i in 0 until limit) {
-                    val pkg = allowedPackages.getString(i)
-                    if (pkg != null) pkgSet.add(pkg)
-                }
-                editor.putStringSet("ALLOWED_APPS", pkgSet)
-            }
 
             if (activeDays != null) {
                 val daySet = HashSet<String>()
@@ -392,7 +413,7 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
                 editor.putStringSet("ACTIVE_DAYS", daySet)
             }
 
-            editor.apply()
+            editor.commit()
             FocusScheduler.scheduleAlarms(reactApplicationContext)
             promise.resolve("Schedule Saved!")
         } catch (e: Exception) {
@@ -410,18 +431,20 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
     ) {
         try {
             val prefs = reactApplicationContext.getSharedPreferences("FocusModePrefs", Context.MODE_PRIVATE)
-            val packagesSet = mutableSetOf<String>()
+            val packagesSet = HashSet<String>()
             val limit = minOf(allowedPackages.size(), 6)
             for (i in 0 until limit) {
-                allowedPackages.getString(i)?.let { packagesSet.add(it) }
+                val pkg = allowedPackages.getString(i)?.trim()
+                if (!pkg.isNullOrEmpty()) packagesSet.add(pkg)
             }
+
+            saveAllowedAppsToPrefs(prefs, packagesSet)
 
             prefs.edit()
                 .putString("MULTI_SCHEDULES_JSON", schedulesJson)
                 .putBoolean("SCHEDULE_ENABLED", globalEnabled)
-                .putStringSet("ALLOWED_APPS", packagesSet)
                 .putInt("YT_LIMIT_MINUTES", ytLimitMinutes)
-                .apply()
+                .commit()
 
             FocusScheduler.scheduleAlarms(reactApplicationContext)
             promise.resolve("Advanced schedules saved successfully")
@@ -429,10 +452,6 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
             promise.reject("ERROR", e.message)
         }
     }
-
-    // =========================================================================
-    // 4. STATE SYNC & EARNED EMERGENCY PASS SYSTEM (0 TO 5 PASSES, 3-DAY STREAK)
-    // =========================================================================
 
     @ReactMethod
     fun getFocusSessionState(promise: Promise) {
@@ -483,6 +502,7 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
                 putInt("totalCompleted", totalCompleted)
                 putInt("ytUsedMinutes", ytUsedMinutes)
                 putInt("ytLimitMinutes", ytLimitMinutes)
+                putString("lastCompletedDate", prefs.getString("LAST_COMPLETED_DATE", "") ?: "")
             }
             promise.resolve(map)
         } catch (e: Exception) {
@@ -504,11 +524,11 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
             val newPasses = (currentPasses - 1).coerceAtLeast(0)
             prefs.edit()
                 .putInt("EMERGENCY_PASSES", newPasses)
-                .putInt("STREAK_DAYS", 0) // Reset 3-day progress toward next pass when breaking lock
+                .putInt("STREAK_DAYS", 0)
                 .putBoolean("IS_SESSION_ACTIVE", false)
                 .remove("SESSION_END_TIME")
                 .remove("SESSION_START_TIME")
-                .apply()
+                .commit()
 
             FocusScheduler.cancelSessionAlarms(reactApplicationContext)
             reactApplicationContext.sendBroadcast(
@@ -526,11 +546,13 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
     fun syncPassAndStreakFromCloud(passes: Int, streakDays: Int, lastDate: String, promise: Promise) {
         try {
             val prefs = reactApplicationContext.getSharedPreferences("FocusModePrefs", Context.MODE_PRIVATE)
-            prefs.edit()
+            val editor = prefs.edit()
                 .putInt("EMERGENCY_PASSES", passes.coerceIn(0, 5))
                 .putInt("STREAK_DAYS", streakDays.coerceIn(0, 2))
-                .putString("LAST_COMPLETED_DATE", lastDate)
-                .apply()
+            if (lastDate.isNotEmpty()) {
+                editor.putString("LAST_COMPLETED_DATE", lastDate)
+            }
+            editor.commit()
             promise.resolve(true)
         } catch (e: Exception) {
             promise.reject("SYNC_ERROR", e.message)

@@ -51,7 +51,6 @@ class FocusBlockerService : AccessibilityService() {
     private var wasInBreakPhase = false
     private var breakWarningShownForCycle = -1L
 
-    // 1x1 pixel anchor overlay that exempts our service from Android's 5-second Home button delay!
     private var anchorOverlayView: View? = null
     private var windowManager: WindowManager? = null
 
@@ -99,8 +98,23 @@ class FocusBlockerService : AccessibilityService() {
         }
     }
 
-    // 🌟 Anchor Overlay keeps a 1x1 invisible window attached during active locks
-    // so Android OS allows 0ms instant startActivity() even right after Home/Recents button press!
+    // Reads allowed apps reliably from both CSV and StringSet so SharedPreferences caching never fails
+    private fun getAllowedAppsSet(prefs: android.content.SharedPreferences): Set<String> {
+        val result = HashSet<String>()
+        val csv = prefs.getString("ALLOWED_APPS_CSV", "") ?: ""
+        if (csv.isNotEmpty()) {
+            csv.split(",").forEach { item ->
+                val clean = item.trim()
+                if (clean.isNotEmpty()) result.add(clean)
+            }
+        }
+        val setVal = prefs.getStringSet("ALLOWED_APPS", null)
+        if (setVal != null) {
+            result.addAll(setVal)
+        }
+        return result
+    }
+
     private fun ensureAnchorOverlay() {
         if (anchorOverlayView != null) return
         try {
@@ -179,7 +193,6 @@ class FocusBlockerService : AccessibilityService() {
                     val cyclePos = elapsed % POMODORO_CYCLE_MILLIS
                     val remainingBreakMillis = POMODORO_CYCLE_MILLIS - cyclePos
 
-                    // Show 30-second warning before 5-min break ends
                     if (remainingBreakMillis in 1..30000L && breakWarningShownForCycle != currentCycleIndex) {
                         breakWarningShownForCycle = currentCycleIndex
                         Toast.makeText(
@@ -190,11 +203,10 @@ class FocusBlockerService : AccessibilityService() {
                     }
                     wasInBreakPhase = true
                 } else if (wasInBreakPhase) {
-                    // Break just finished! Pull user immediately back to Lock App if they are in an unallowed app
                     wasInBreakPhase = false
                     ensureForegroundNotification()
                     val currentPkg = rootInActiveWindow?.packageName?.toString() ?: ""
-                    val allowedApps = prefs.getStringSet("ALLOWED_APPS", emptySet()) ?: emptySet()
+                    val allowedApps = getAllowedAppsSet(prefs)
                     if (currentPkg.isNotEmpty() &&
                         currentPkg != applicationContext.packageName &&
                         !allowedApps.contains(currentPkg)
@@ -215,27 +227,12 @@ class FocusBlockerService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         val eventType = event?.eventType ?: return
-        val rootNode = rootInActiveWindow
-        val rootPackageName = rootNode?.packageName?.toString()
-        val eventPackageName = event.packageName?.toString()
-        val packageName = (if (eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED) {
-            rootPackageName ?: eventPackageName
-        } else {
-            eventPackageName ?: rootPackageName
-        }) ?: return
-
-        val ownPackage = applicationContext.packageName
-        if (packageName == ownPackage) {
-            stopYouTubeTracker()
-            return
-        }
-
         val prefs = getSharedPreferences("FocusModePrefs", Context.MODE_PRIVATE)
         val sessionActive = prefs.getBoolean("IS_SESSION_ACTIVE", false)
+        if (!sessionActive) return
+
         val sessionEnd = prefs.getLong("SESSION_END_TIME", 0L)
         val now = System.currentTimeMillis()
-
-        if (!sessionActive) return
 
         if (sessionEnd in 1..now) {
             stopFocusSession(completedNaturally = true)
@@ -244,11 +241,42 @@ class FocusBlockerService : AccessibilityService() {
 
         ensureAnchorOverlay()
 
-        // Allow soft keyboard / input methods and permission controller dialogs
-        if (packageName.contains("inputmethod") ||
-            packageName.contains("keyboard") ||
-            packageName.contains("honeyboard") ||
-            packageName.contains("gboard")
+        val rootNode = rootInActiveWindow
+        val rootPackageName = rootNode?.packageName?.toString()
+        val eventPackageName = event.packageName?.toString()
+
+        // 🌟 FIX: Status bar (com.android.systemui) fires TYPE_WINDOW_CONTENT_CHANGED every second
+        // for network speed (KB/s) and clock seconds! Ignore systemui unless user actually opened Recents/Overview!
+        if (eventPackageName == "com.android.systemui") {
+            val className = event.className?.toString()?.lowercase() ?: ""
+            val isRecentsOpened = eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+                (className.contains("recents") ||
+                    className.contains("overview") ||
+                    className.contains(" panel") ||
+                    className.contains("quicksettings"))
+            if (!isRecentsOpened) {
+                return
+            }
+        }
+
+        // Determine actual foreground package: prefer rootPackageName (the real active app window)
+        val packageName = rootPackageName ?: eventPackageName ?: return
+
+        val ownPackage = applicationContext.packageName
+        if (packageName == ownPackage) {
+            stopYouTubeTracker()
+            return
+        }
+
+        // Ignore keyboards, input methods, and system permission dialogs
+        val lowerPkg = packageName.lowercase()
+        if (lowerPkg.contains("inputmethod") ||
+            lowerPkg.contains("keyboard") ||
+            lowerPkg.contains("honeyboard") ||
+            lowerPkg.contains("gboard") ||
+            lowerPkg.contains("ridmik") ||
+            lowerPkg.contains("permissioncontroller") ||
+            lowerPkg.contains("packageinstaller")
         ) {
             return
         }
@@ -256,7 +284,6 @@ class FocusBlockerService : AccessibilityService() {
         // Check if we are in the 5-minute Pomodoro Break Phase
         if (isCurrentlyInBreakPhase(prefs, now)) {
             stopYouTubeTracker()
-            // Even during break, block Settings if user tries to tamper with Device Admin or Accessibility
             if (packageName == "com.android.settings" && rootNode != null && isTamperingWithSettings(rootNode)) {
                 performGlobalAction(GLOBAL_ACTION_BACK)
                 redirectToMainActivity(force = true)
@@ -264,87 +291,115 @@ class FocusBlockerService : AccessibilityService() {
             return
         }
 
-        val allowedApps = prefs.getStringSet("ALLOWED_APPS", emptySet()) ?: emptySet()
+        val allowedApps = getAllowedAppsSet(prefs)
 
-        // 1. Check YouTube Long Video Quota & Shorts Blocker
-        if (packageName == "com.google.android.youtube" && allowedApps.contains(packageName)) {
-            resetDailyYouTubeQuotaIfNeeded(prefs)
-            val usedMillis = prefs.getLong("YT_USED_MILLIS", 0L)
-            val limitMinutes = prefs.getInt("YT_LIMIT_MINUTES", 90)
-            val limitMillis = limitMinutes * 60 * 1000L
-
-            if (usedMillis >= limitMillis) {
-                stopYouTubeTracker()
-                showThrottledToast("⏳ আজকের YouTube লং ভিডিওর সময়সীমা ($limitMinutes মিনিট) শেষ!")
-                redirectToMainActivity(force = true)
+        // 🌟 FIX: If user just tapped a whitelisted app inside our Lock Screen, allow smooth transition!
+        val lastLaunchedApp = prefs.getString("LAST_LAUNCHED_ALLOWED_APP", "") ?: ""
+        val graceUntil = prefs.getLong("WHITELIST_GRACE_UNTIL", 0L)
+        if (now < graceUntil && lastLaunchedApp.isNotEmpty()) {
+            if (packageName == lastLaunchedApp || eventPackageName == lastLaunchedApp) {
                 return
             }
+            // Also ignore intermediate launcher frame during app-open animation
+            if (lowerPkg.contains("launcher") || lowerPkg.contains("systemui")) {
+                return
+            }
+        }
 
-            // Block Shorts immediately
-            var currentParent = event.source
-            var caughtShorts = false
-            while (currentParent != null) {
-                if (isShortsNode(currentParent)) {
-                    caughtShorts = true
-                    break
+        // 🌟 WHITELISTED APPS HANDLING (NEVER kick user back to Lock Screen when using an allowed app!)
+        val isAllowedApp = allowedApps.contains(packageName) ||
+            (eventPackageName != null && allowedApps.contains(eventPackageName))
+
+        if (isAllowedApp) {
+            val activeAllowedPkg = if (allowedApps.contains(packageName)) packageName else eventPackageName!!
+
+            // 1. YouTube Long Video Quota & Shorts Blocker
+            if (activeAllowedPkg == "com.google.android.youtube") {
+                resetDailyYouTubeQuotaIfNeeded(prefs)
+                val usedMillis = prefs.getLong("YT_USED_MILLIS", 0L)
+                val limitMinutes = prefs.getInt("YT_LIMIT_MINUTES", 90)
+                val limitMillis = limitMinutes * 60 * 1000L
+
+                if (usedMillis >= limitMillis) {
+                    stopYouTubeTracker()
+                    showThrottledToast("⏳ আজকের YouTube লং ভিডিওর সময়সীমা ($limitMinutes মিনিট) শেষ!")
+                    redirectToMainActivity(force = true)
+                    return
                 }
-                currentParent = currentParent.parent
-            }
 
-            if (caughtShorts || (rootNode != null && containsShortsContent(rootNode))) {
-                performGlobalAction(GLOBAL_ACTION_BACK)
-                showThrottledToast("🚫 Focus Mode চলাকালীন YouTube Shorts ব্লক করা আছে!")
+                var currentParent = event.source
+                var caughtShorts = false
+                while (currentParent != null) {
+                    if (isShortsNode(currentParent)) {
+                        caughtShorts = true
+                        break
+                    }
+                    currentParent = currentParent.parent
+                }
+
+                if (caughtShorts || (rootNode != null && containsShortsContent(rootNode))) {
+                    performGlobalAction(GLOBAL_ACTION_BACK)
+                    showThrottledToast("🚫 Focus Mode চলাকালীন YouTube Shorts ব্লক করা আছে!")
+                    return
+                }
+
+                startYouTubeTracker(prefs)
                 return
             }
 
-            startYouTubeTracker(prefs)
-            return
-        }
-
-        // 2. Check Google Chrome (and Browsers) Allowed Websites Filter
-        if ((packageName == "com.android.chrome" ||
-                packageName == "com.brave.browser" ||
-                packageName == "com.sec.android.app.sbrowser") &&
-            allowedApps.contains(packageName)
-        ) {
-            stopYouTubeTracker()
-            val allowedDomains = prefs.getStringSet("ALLOWED_DOMAINS", emptySet()) ?: emptySet()
-            if (allowedDomains.isNotEmpty() && rootNode != null) {
-                checkBrowserUrlAndBlock(rootNode, packageName, allowedDomains)
+            // 2. Chrome & Browser Allowed Websites Filter
+            if (activeAllowedPkg == "com.android.chrome" ||
+                activeAllowedPkg == "com.brave.browser" ||
+                activeAllowedPkg == "com.sec.android.app.sbrowser"
+            ) {
+                stopYouTubeTracker()
+                val allowedDomains = prefs.getStringSet("ALLOWED_DOMAINS", emptySet()) ?: emptySet()
+                if (allowedDomains.isNotEmpty() && rootNode != null) {
+                    checkBrowserUrlAndBlock(rootNode, activeAllowedPkg, allowedDomains)
+                }
+                return
             }
-            return
-        }
 
-        // 3. Check Instagram / Facebook Reels if those apps were whitelisted
-        if ((packageName == "com.instagram.android" || packageName == "com.facebook.katana") &&
-            allowedApps.contains(packageName)
-        ) {
-            stopYouTubeTracker()
-            if (rootNode != null && containsShortsContent(rootNode)) {
-                performGlobalAction(GLOBAL_ACTION_BACK)
-                showThrottledToast("🚫 Focus Mode চলাকালীন Reels ব্লক করা আছে!")
+            // 3. Instagram / Facebook Reels Blocker (if whitelisted)
+            if (activeAllowedPkg == "com.instagram.android" || activeAllowedPkg == "com.facebook.katana") {
+                stopYouTubeTracker()
+                if (rootNode != null && containsShortsContent(rootNode)) {
+                    performGlobalAction(GLOBAL_ACTION_BACK)
+                    showThrottledToast("🚫 Focus Mode চলাকালীন Reels ব্লক করা আছে!")
+                }
+                return
             }
-            return
-        }
 
-        // 4. Other Whitelisted Apps (up to 5-6 apps)
-        if (allowedApps.contains(packageName)) {
+            // 4. All other whitelisted apps: let them run 100% freely!
             stopYouTubeTracker()
             return
         }
 
-        // 5. NON-WHITELISTED APP OR HOME LAUNCHER OR RECENTS -> INSTANT 0ms PULL BACK TO LOCK APP!
+        // =====================================================================
+        // NON-WHITELISTED APP OR HOME LAUNCHER OR RECENTS
+        // Only trigger redirect on actual window state transitions so background
+        // system events never falsely pull the user out of a whitelisted app!
+        // =====================================================================
+        val isWindowTransition = eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+            eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED
+        if (!isWindowTransition) return
+
+        // Double-check rootInActiveWindow: if the foreground window is still an allowed app or our app, do NOT redirect!
+        if (rootPackageName != null && (rootPackageName == ownPackage || allowedApps.contains(rootPackageName))) {
+            return
+        }
+
         stopYouTubeTracker()
 
-        val isSystemOrRecents = packageName.contains("systemui") ||
-            packageName.contains("recents") ||
-            packageName.contains("overview")
-
-        if (isSystemOrRecents) {
+        val className = event.className?.toString()?.lowercase() ?: ""
+        if (lowerPkg.contains("systemui") ||
+            lowerPkg.contains("recents") ||
+            lowerPkg.contains("overview") ||
+            className.contains("recents")
+        ) {
             performGlobalAction(GLOBAL_ACTION_BACK)
         }
 
-        // Immediately pull user into our Lock App with 0ms delay!
         redirectToMainActivity(force = false)
     }
 
@@ -369,7 +424,6 @@ class FocusBlockerService : AccessibilityService() {
         }
 
         val urlBar = urlBarNode ?: return
-        // Do not block while user is actively typing in the address bar
         if (urlBar.isFocused) return
 
         val rawText = urlBar.text?.toString()?.trim()?.lowercase() ?: return
@@ -383,7 +437,6 @@ class FocusBlockerService : AccessibilityService() {
             return
         }
 
-        // Check if current URL matches any user-allowed domain
         val isAllowed = allowedDomains.any { domain ->
             val cleanDomain = domain.trim().lowercase()
                 .removePrefix("https://")
@@ -416,8 +469,7 @@ class FocusBlockerService : AccessibilityService() {
 
     private fun redirectToMainActivity(force: Boolean) {
         val now = System.currentTimeMillis()
-        // Ultra-fast 120ms debounce so it never lags when pressing Home/Recents
-        if (!force && now - lastRedirectAt < 120L) return
+        if (!force && now - lastRedirectAt < 250L) return
         lastRedirectAt = now
 
         val intent = Intent(this, MainActivity::class.java).apply {
@@ -491,15 +543,21 @@ class FocusBlockerService : AccessibilityService() {
 
         val prefs = getSharedPreferences("FocusModePrefs", Context.MODE_PRIVATE)
         val wasActive = prefs.getBoolean("IS_SESSION_ACTIVE", false)
+        val startTime = prefs.getLong("SESSION_START_TIME", 0L)
+        val plannedDuration = prefs.getLong("SESSION_PLANNED_DURATION", 0L)
+        val now = System.currentTimeMillis()
+        val actualElapsed = if (startTime > 0L) (now - startTime) else plannedDuration
+        val completedDuration = if (plannedDuration > 0L) minOf(plannedDuration, actualElapsed) else actualElapsed
 
         prefs.edit()
             .putBoolean("IS_SESSION_ACTIVE", false)
             .remove("SESSION_END_TIME")
             .remove("SESSION_START_TIME")
-            .apply()
+            .remove("SESSION_PLANNED_DURATION")
+            .commit()
 
         if (completedNaturally && wasActive) {
-            FocusScheduler.recordSuccessfulLockDay(this)
+            FocusScheduler.recordSuccessfulLockDay(this, completedDuration)
         }
 
         FocusScheduler.cancelSessionAlarms(this)

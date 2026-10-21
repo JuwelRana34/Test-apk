@@ -214,25 +214,6 @@ export async function scheduleContactNotificationsOffline(
         trigger: {
           type: Notifications.SchedulableTriggerInputTypes.DAILY,
           hour: 19,
-          minute: 30,
-          channelId: CONTACT_REMINDER_CHANNEL,
-        },
-      });
-
-      await Notifications.scheduleNotificationAsync({
-        identifier: "daily-contact-morning",
-        content: {
-          title,
-          body,
-          sound: "default",
-          data: {
-            screen: "/features/SmartNetworking",
-            contactId: primary.id,
-          },
-        },
-        trigger: {
-          type: Notifications.SchedulableTriggerInputTypes.DAILY,
-          hour: 10,
           minute: 0,
           channelId: CONTACT_REMINDER_CHANNEL,
         },
@@ -556,7 +537,7 @@ export async function restoreCloudBackupAfterGoogleLogin(): Promise<void> {
       await FocusLock.syncPassAndStreakFromCloud(
         backup.emergencyPasses,
         backup.streakDays ?? 0,
-        "",
+        backup.lastCompletedDate || "",
       );
     }
   } catch {}

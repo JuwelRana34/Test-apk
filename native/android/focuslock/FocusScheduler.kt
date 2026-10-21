@@ -5,6 +5,9 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.widget.Toast
 import org.json.JSONArray
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -13,43 +16,94 @@ import java.util.Locale
 
 object FocusScheduler {
 
-    // 🌟 Earned Emergency Pass Algorithm:
-    // Complete lock sessions for 3 consecutive days without breaking -> +1 Emergency Pass (Max 5, Min 0)
-    fun recordSuccessfulLockDay(context: Context) {
+    // কমপক্ষে ৩০ মিনিটের লক পূর্ণ না হলে স্ট্রিক বাড়বে না (29m 50s threshold to allow slight alarm jitter)
+    private const val MIN_VALID_LOCK_DURATION_MILLIS = (30 * 60 * 1000L) - 10_000L
+
+    /**
+     * 🌟 Earned Emergency Pass & Daily Streak Algorithm:
+     * ১. লকের সময় কমপক্ষে ৩০ মিনিট (MIN_VALID_LOCK_DURATION_MILLIS) হতে হবে। ২ মিনিট বা ১ মিনিটের লকে স্ট্রিক বাড়বে না!
+     * ২. একই দিনে (Same Calendar Date: yyyy-MM-dd) সর্বোচ্চ ১ বারই স্ট্রিক বাড়বে (দিনে ১০ বার লক করলেও ১ স্ট্রিকই যোগ হবে)।
+     * ৩. টানা ৩ দিন সফলভাবে লক পূর্ণ করলে +1 Emergency Pass যোগ হবে (সর্বোচ্চ ৫টি, সর্বনিম্ন ০টি)।
+     */
+    @Synchronized
+    fun recordSuccessfulLockDay(context: Context, completedDurationMillis: Long) {
         val prefs = context.getSharedPreferences("FocusModePrefs", Context.MODE_PRIVATE)
+        val mainHandler = Handler(Looper.getMainLooper())
+
+        // শর্ত ১: কমপক্ষে ৩০ মিনিট পূর্ণ হয়েছে কি না চেক করো
+        if (completedDurationMillis < MIN_VALID_LOCK_DURATION_MILLIS) {
+            mainHandler.post {
+                Toast.makeText(
+                    context.applicationContext,
+                    "ℹ️ লক শেষ হয়েছে! (১ স্ট্রিক পেতে কমপক্ষে ৩০ মিনিটের লক পূর্ণ করতে হবে)",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+            return
+        }
+
         val todayStr = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
         val lastDate = prefs.getString("LAST_COMPLETED_DATE", "") ?: ""
 
-        val totalCompleted = prefs.getInt("TOTAL_COMPLETED_SESSIONS", 0) + 1
-        val editor = prefs.edit().putInt("TOTAL_COMPLETED_SESSIONS", totalCompleted)
-
-        // Only count 1 streak day per calendar date
-        if (lastDate != todayStr) {
-            val yesterdayCal = Calendar.getInstance().apply { add(Calendar.DATE, -1) }
-            val yesterdayStr = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(yesterdayCal.time)
-
-            var currentStreak = if (lastDate == yesterdayStr || lastDate.isEmpty()) {
-                prefs.getInt("STREAK_DAYS", 0) + 1
-            } else {
-                1 // Missed a day, restart 3-day counter from 1
+        // শর্ত ২: আজকে যদি ইতিমধ্যেই ১ স্ট্রিক যোগ হয়ে থাকে, তবে আজ আর বাড়বে না!
+        if (lastDate == todayStr) {
+            mainHandler.post {
+                Toast.makeText(
+                    context.applicationContext,
+                    "🎉 লক সম্পন্ন! (আজকের ১ স্ট্রিক আগেই যোগ হয়েছে)",
+                    Toast.LENGTH_SHORT
+                ).show()
             }
-
-            var currentPasses = prefs.getInt("EMERGENCY_PASSES", 0).coerceIn(0, 5)
-
-            // Every 3 consecutive days -> +1 Emergency Pass (capped at maximum 5)
-            if (currentStreak >= 3) {
-                if (currentPasses < 5) {
-                    currentPasses += 1
-                }
-                currentStreak = 0
-            }
-
-            editor.putInt("STREAK_DAYS", currentStreak)
-                .putInt("EMERGENCY_PASSES", currentPasses)
-                .putString("LAST_COMPLETED_DATE", todayStr)
+            return
         }
 
-        editor.apply()
+        val totalCompleted = prefs.getInt("TOTAL_COMPLETED_SESSIONS", 0) + 1
+        val yesterdayCal = Calendar.getInstance().apply { add(Calendar.DATE, -1) }
+        val yesterdayStr = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(yesterdayCal.time)
+
+        var currentStreak = if (lastDate == yesterdayStr || lastDate.isEmpty()) {
+            prefs.getInt("STREAK_DAYS", 0) + 1
+        } else {
+            1 // মাঝখানে দিন গ্যাপ গেলে আবার ১ থেকে শুরু
+        }
+
+        var currentPasses = prefs.getInt("EMERGENCY_PASSES", 0).coerceIn(0, 5)
+        var earnedNewPass = false
+
+        // টানা ৩ দিন পূর্ণ হলে +1 Emergency Pass (সর্বোচ্চ ৫টি)
+        if (currentStreak >= 3) {
+            if (currentPasses < 5) {
+                currentPasses += 1
+                earnedNewPass = true
+            }
+            currentStreak = 0
+        }
+
+        // Synchronous commit() যাতে সাথে সাথে ডিস্কে সেভ হয় এবং ডাবল কাউন্ট না হয়
+        prefs.edit()
+            .putInt("TOTAL_COMPLETED_SESSIONS", totalCompleted)
+            .putInt("STREAK_DAYS", currentStreak)
+            .putInt("EMERGENCY_PASSES", currentPasses)
+            .putString("LAST_COMPLETED_DATE", todayStr)
+            .commit()
+
+        val finalPassCount = currentPasses
+        val finalStreakCount = currentStreak
+        mainHandler.post {
+            if (earnedNewPass) {
+                Toast.makeText(
+                    context.applicationContext,
+                    "🎟️ অভিনন্দন! টানা ৩ দিন লক পূর্ণ করায় +1 Emergency Pass পেয়েছেন! (মোট: $finalPassCount/5)",
+                    Toast.LENGTH_LONG
+                ).show()
+            } else {
+                Toast.makeText(
+                    context.applicationContext,
+                    "🔥 আজকের স্ট্রিক সম্পন্ন! ($finalStreakCount/3 দিন)",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
     }
 
     fun cancelSessionAlarms(context: Context) {

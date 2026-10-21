@@ -14,12 +14,10 @@ import "../global.css";
 import {
   ensureNotificationChannelsAndPermissions,
   registerExpoPushTokenOnlineOffline,
-} from "../lib/supabase";
-import {
   restoreCloudBackupAfterGoogleLogin,
   syncLocalDataToCloudIfOnline,
+  supabase,
 } from "../lib/supabase";
-import { supabase } from "../lib/supabase";
 
 SplashScreen.preventAutoHideAsync();
 
@@ -37,11 +35,9 @@ export default function RootLayout() {
 
   useEffect(() => {
     const initAuthAndNotifications = async () => {
-      // 1. Setup Android Notification Channels (Offline + Online)
       void ensureNotificationChannelsAndPermissions();
       void registerExpoPushTokenOnlineOffline();
 
-      // 2. Check local offline login flag first (0ms delay, works without internet)
       const storedStatus = await AsyncStorage.getItem("@is_logged_in");
       const isOfflineLogged = storedStatus === "true";
 
@@ -50,7 +46,6 @@ export default function RootLayout() {
         setInitialized(true);
       }
 
-      // 3. Check Supabase session if online
       try {
         const {
           data: { session },
@@ -65,7 +60,6 @@ export default function RootLayout() {
           setHasOfflineSession(false);
         }
       } catch {
-        // Offline: keep existing offline session state intact
         if (!isOfflineLogged) {
           setHasOfflineSession(false);
         }
@@ -92,7 +86,6 @@ export default function RootLayout() {
     return () => subscription.unsubscribe();
   }, []);
 
-  // Automatically route user to StrictFocusScreen when FocusBlockerService pulls user back into the app!
   useEffect(() => {
     if (!initialized || !rootNavigationState?.key || !hasOfflineSession) return;
 
@@ -135,7 +128,13 @@ export default function RootLayout() {
       appStateSub.remove();
       notifResponseSub.remove();
     };
-  }, [initialized, rootNavigationState?.key, hasOfflineSession, segments, router]);
+  }, [
+    initialized,
+    rootNavigationState?.key,
+    hasOfflineSession,
+    segments,
+    router,
+  ]);
 
   useEffect(() => {
     if (!initialized || !rootNavigationState?.key) return;

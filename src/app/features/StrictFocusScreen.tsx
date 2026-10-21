@@ -10,6 +10,7 @@ import {
   AppState,
   BackHandler,
   Image,
+  KeyboardAvoidingView,
   Modal,
   NativeModules,
   PermissionsAndroid,
@@ -22,9 +23,14 @@ import {
   Vibration,
   View,
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
-import { addInAppNotice } from "../../lib/supabase";
-import { syncLocalDataToCloudIfOnline } from "../../lib/supabase";
+import {
+  SafeAreaView,
+  useSafeAreaInsets,
+} from "react-native-safe-area-context";
+import {
+  addInAppNotice,
+  syncLocalDataToCloudIfOnline,
+} from "../../lib/supabase";
 
 interface AppItem {
   packageName: string;
@@ -53,6 +59,7 @@ interface FocusSessionState {
   totalCompleted: number;
   ytUsedMinutes: number;
   ytLimitMinutes: number;
+  lastCompletedDate?: string;
 }
 
 interface NativeFocusLock {
@@ -137,19 +144,18 @@ const getAppColor = (name: string) => {
 };
 
 export default function StrictFocusScreen() {
-  // Session Lock Config
-  const [customDuration, setCustomDuration] = useState("120");
+  const insets = useSafeAreaInsets();
+
+  const [customDuration, setCustomDuration] = useState("60");
   const [pomodoroEnabled, setPomodoroEnabled] = useState(true);
   const [ytLimitMinutes, setYtLimitMinutes] = useState(90);
 
-  // Permissions State
   const [permState, setPermState] = useState({
     accessibility: false,
     overlay: false,
     deviceAdmin: false,
   });
 
-  // Allowed Apps (Max 6) & Allowed Chrome Websites
   const [installedApps, setInstalledApps] = useState<AppItem[]>([]);
   const [selectedApps, setSelectedApps] = useState<string[]>([]);
   const [allowedDomains, setAllowedDomains] = useState<string[]>(
@@ -162,7 +168,6 @@ export default function StrictFocusScreen() {
   const [domainModalVisible, setDomainModalVisible] = useState(false);
   const [emergencyModalVisible, setEmergencyModalVisible] = useState(false);
 
-  // Schedule Lock Config
   const [schedules, setSchedules] = useState<ScheduleItem[]>([
     {
       id: "1",
@@ -178,10 +183,8 @@ export default function StrictFocusScreen() {
     type: "start" | "end";
   } | null>(null);
 
-  // Live Session & Gamified Emergency Pass State (0 to 5 passes, 3-day streak)
   const [isFocusActive, setIsFocusActive] = useState(false);
-  const [sessionEndTimeMillis, setSessionEndTimeMillis] = useState(0);
-  const [remainingMillis, setRemainingMillis] = useState(0);
+  const [ remainingMillis, setRemainingMillis] = useState(0);
   const [lockMode, setLockMode] = useState<"SESSION" | "SCHEDULE">("SESSION");
   const [isBreakActive, setIsBreakActive] = useState(false);
   const [cycleRemainingMillis, setCycleRemainingMillis] = useState(0);
@@ -220,7 +223,6 @@ export default function StrictFocusScreen() {
       const session = await FocusLock.getFocusSessionState();
       const active = session.active && session.endTimeMillis > Date.now();
       setIsFocusActive(active);
-      setSessionEndTimeMillis(active ? session.endTimeMillis : 0);
       setRemainingMillis(
         active ? Math.max(0, session.endTimeMillis - Date.now()) : 0,
       );
@@ -263,7 +265,6 @@ export default function StrictFocusScreen() {
     };
   }, [checkAllPermissions, refreshFocusSession]);
 
-  // Block hardware back button when strict lock is active
   useEffect(() => {
     if (!isFocusActive) return;
     const subscription = BackHandler.addEventListener(
@@ -307,6 +308,9 @@ export default function StrictFocusScreen() {
           MAX_SELECTED_APPS,
         );
         setSelectedApps(parsedApps);
+        if (FocusLock?.saveAllowedApps) {
+          await FocusLock.saveAllowedApps(parsedApps);
+        }
       }
 
       if (savedDomains) {
@@ -494,7 +498,7 @@ export default function StrictFocusScreen() {
     if (emergencyPasses <= 0) {
       Alert.alert(
         "কোনো Emergency Pass নেই 🔒",
-        "আপনার কাছে এখন ০টি পাস আছে। টানা ৩ দিন নিয়ম মেনে লক পূর্ণ করলে ১টি Emergency Pass পাবেন!",
+        "আপনার কাছে এখন ০টি পাস আছে। টানা ৩ দিন (কমপক্ষে ৩০ মিনিট করে) নিয়ম মেনে লক পূর্ণ করলে ১টি Emergency Pass পাবেন!",
       );
       setEmergencyModalVisible(false);
       return;
@@ -630,7 +634,7 @@ export default function StrictFocusScreen() {
   );
 
   // =========================================================================
-  // ACTIVE LOCK SCREEN DASHBOARD (0ms Pull-To-Lock-App Destination)
+  // ACTIVE LOCK SCREEN DASHBOARD (Overflow-Proof & SafeArea Protected)
   // =========================================================================
   if (isFocusActive) {
     const allowedAppObjects = installedApps.filter((app) =>
@@ -638,19 +642,24 @@ export default function StrictFocusScreen() {
     );
 
     return (
-      <SafeAreaView className="flex-1 bg-[#070B14] px-6">
+      <SafeAreaView
+        className="flex-1 bg-[#070B14]"
+        edges={["top", "bottom", "left", "right"]}
+      >
         <StatusBar style="light" />
         <ScrollView
           contentContainerStyle={{
             flexGrow: 1,
-            justifyContent: "center",
-            paddingVertical: 24,
+            justifyContent: "space-between",
+            paddingHorizontal: 18,
+            paddingTop: 12,
+            paddingBottom: Math.max(24, insets.bottom + 16),
           }}
           showsVerticalScrollIndicator={false}
         >
           {/* Top Pass & Mode Pill */}
-          <View className="flex-row items-center justify-between mb-6">
-            <View className="bg-slate-800/90 border border-slate-700 px-3.5 py-2 rounded-full flex-row items-center">
+          <View className="flex-row items-center justify-between gap-2">
+            <View className="bg-slate-800/90 border border-slate-700 px-3 py-1.5 rounded-full flex-row items-center flex-shrink">
               <Ionicons
                 name={
                   lockMode === "SCHEDULE"
@@ -659,12 +668,13 @@ export default function StrictFocusScreen() {
                       ? "cafe"
                       : "shield-checkmark"
                 }
-                size={15}
+                size={14}
                 color={isBreakActive ? "#34D399" : "#F43F5E"}
               />
               <Text
                 allowFontScaling={false}
-                className="text-slate-200 font-bold text-xs ml-1.5"
+                numberOfLines={1}
+                className="text-slate-200 font-bold text-[11px] ml-1.5"
               >
                 {lockMode === "SCHEDULE"
                   ? "Schedule Lock"
@@ -674,13 +684,13 @@ export default function StrictFocusScreen() {
               </Text>
             </View>
 
-            <View className="bg-amber-500/15 border border-amber-500/30 px-3.5 py-2 rounded-full flex-row items-center">
-              <Ionicons name="ticket" size={15} color="#FBBF24" />
+            <View className="bg-amber-500/15 border border-amber-500/30 px-3 py-1.5 rounded-full flex-row items-center">
+              <Ionicons name="ticket" size={14} color="#FBBF24" />
               <Text
                 allowFontScaling={false}
-                className="text-amber-300 font-bold text-xs ml-1.5"
+                className="text-amber-300 font-bold text-[11px] ml-1.5"
               >
-                Pass: {emergencyPasses} / 5
+                Pass: {emergencyPasses}/5 • Streak: {streakDays}/3
               </Text>
             </View>
           </View>
@@ -688,7 +698,7 @@ export default function StrictFocusScreen() {
           {/* Center Lock / Break Status */}
           <View className="items-center my-4">
             <View
-              className={`w-24 h-24 rounded-full items-center justify-center border-2 ${
+              className={`w-20 h-20 rounded-full items-center justify-center border-2 ${
                 isBreakActive
                   ? "bg-emerald-500/15 border-emerald-400"
                   : "bg-rose-500/15 border-rose-500"
@@ -696,14 +706,14 @@ export default function StrictFocusScreen() {
             >
               <Ionicons
                 name={isBreakActive ? "cafe" : "lock-closed"}
-                size={46}
+                size={40}
                 color={isBreakActive ? "#34D399" : "#F43F5E"}
               />
             </View>
 
             <Text
               allowFontScaling={false}
-              className="text-white text-2xl font-black mt-5 text-center"
+              className="text-white text-xl font-black mt-4 text-center px-2"
             >
               {isBreakActive
                 ? "৫ মিনিটের ফ্রি ব্রেক চলছে! ☕"
@@ -712,17 +722,16 @@ export default function StrictFocusScreen() {
 
             <Text
               allowFontScaling={false}
-              className="text-slate-400 text-xs font-medium mt-1.5 text-center px-4"
+              className="text-slate-400 text-xs font-medium mt-1 text-center px-3 leading-4"
             >
               {isBreakActive
                 ? "ব্রেক শেষ হওয়া মাত্রই আপনাকে আবার এই লক স্ক্রিনে টেনে আনা হবে।"
-                : "সিলেক্ট করা অ্যাপ ছাড়া অন্য কোথাও গেলে সাথে সাথে এখানে ফিরিয়ে আনা হবে।"}
+                : "নিচের অনুমোদিত অ্যাপে ট্যাপ করে ব্যবহার করুন। বাইরে গেলে এখানে ফিরিয়ে আনা হবে।"}
             </Text>
 
-            {/* Primary Countdown */}
             <Text
               allowFontScaling={false}
-              className={`text-5xl font-black mt-6 tracking-widest ${
+              className={`text-4xl font-black mt-4 tracking-widest ${
                 isBreakActive ? "text-emerald-400" : "text-rose-400"
               }`}
             >
@@ -732,95 +741,96 @@ export default function StrictFocusScreen() {
             </Text>
 
             {lockMode === "SESSION" && pomodoroEnabled && (
-              <View className="bg-slate-800/80 px-4 py-1.5 rounded-full mt-2 border border-slate-700">
+              <View className="bg-slate-800/80 px-3.5 py-1.5 rounded-full mt-2 border border-slate-700">
                 <Text
                   allowFontScaling={false}
-                  className="text-slate-300 text-xs font-bold"
+                  numberOfLines={1}
+                  className="text-slate-300 text-[11px] font-bold text-center"
                 >
-                  {isBreakActive
-                    ? "পরবর্তী ২৫ মি. লক শুরু হতে বাকি • "
-                    : "৫ মি. ব্রেক পেতে বাকি • "}
-                  মোট সেশন বাকি: {formatCountdown(remainingMillis)}
+                  {isBreakActive ? "লক শুরু হতে বাকি • " : "ব্রেক পেতে বাকি • "}
+                  মোট বাকি: {formatCountdown(remainingMillis)}
                 </Text>
               </View>
             )}
           </View>
 
-          {/* YouTube Quota Bar */}
-          <View className="bg-slate-900/90 border border-slate-800 rounded-2xl p-3.5 my-3 flex-row items-center justify-between">
-            <View className="flex-row items-center">
-              <Ionicons name="logo-youtube" size={18} color="#EF4444" />
+          {/* Middle Section: YouTube Quota + Allowed Apps Grid */}
+          <View>
+            <View className="bg-slate-900/90 border border-slate-800 rounded-2xl p-3 mb-3 flex-row items-center justify-between">
+              <View className="flex-row items-center flex-1 pr-2">
+                <Ionicons name="logo-youtube" size={16} color="#EF4444" />
+                <Text
+                  allowFontScaling={false}
+                  numberOfLines={1}
+                  className="text-slate-300 text-xs font-bold ml-2 flex-1"
+                >
+                  YouTube Long Video (Shorts Blocked)
+                </Text>
+              </View>
               <Text
                 allowFontScaling={false}
-                className="text-slate-300 text-xs font-bold ml-2"
+                className="text-indigo-400 text-xs font-black"
               >
-                YouTube Long Video (Shorts Blocked)
+                {ytUsedMinutes}m / {ytLimitMinutes}m
               </Text>
             </View>
-            <Text
-              allowFontScaling={false}
-              className="text-indigo-400 text-xs font-black"
-            >
-              {ytUsedMinutes}m / {ytLimitMinutes}m
-            </Text>
-          </View>
 
-          {/* 5-6 Allowed Apps Minimalist Grid */}
-          <View className="bg-slate-900/90 border border-slate-800 rounded-3xl p-5 mt-3">
-            <Text
-              allowFontScaling={false}
-              className="text-slate-400 text-xs font-bold uppercase tracking-wider text-center mb-4"
-            >
-              অনুমোদিত অ্যাপ ({allowedAppObjects.length}/{MAX_SELECTED_APPS})
-            </Text>
-
-            {allowedAppObjects.length === 0 ? (
+            <View className="bg-slate-900/90 border border-slate-800 rounded-3xl p-4">
               <Text
                 allowFontScaling={false}
-                className="text-slate-500 text-xs text-center py-3"
+                className="text-slate-400 text-[11px] font-bold uppercase tracking-wider text-center mb-3"
               >
-                কোনো অ্যাপ সিলেক্ট করা হয়নি।
+                অনুমোদিত অ্যাপ ({allowedAppObjects.length}/{MAX_SELECTED_APPS})
               </Text>
-            ) : (
-              <View className="flex-row flex-wrap justify-center">
-                {allowedAppObjects.map((app) => (
-                  <Pressable
-                    key={app.packageName}
-                    onPress={() => void FocusLock?.openApp(app.packageName)}
-                    className="items-center w-[28%] mx-1.5 mb-4 bg-slate-800/80 p-3 rounded-2xl border border-slate-700/60 active:bg-slate-700"
-                  >
-                    {app.icon ? (
-                      <Image
-                        source={{ uri: `data:image/png;base64,${app.icon}` }}
-                        style={{ width: 42, height: 42, borderRadius: 10 }}
-                      />
-                    ) : (
-                      <Ionicons
-                        name="apps"
-                        size={42}
-                        color={getAppColor(app.appName)}
-                      />
-                    )}
-                    <Text
-                      allowFontScaling={false}
-                      numberOfLines={1}
-                      className="text-white text-[11px] font-bold mt-2 text-center"
+
+              {allowedAppObjects.length === 0 ? (
+                <Text
+                  allowFontScaling={false}
+                  className="text-slate-500 text-xs text-center py-3"
+                >
+                  কোনো অ্যাপ সিলেক্ট করা হয়নি।
+                </Text>
+              ) : (
+                <View className="flex-row flex-wrap justify-between">
+                  {allowedAppObjects.map((app) => (
+                    <Pressable
+                      key={app.packageName}
+                      onPress={() => void FocusLock?.openApp(app.packageName)}
+                      className="items-center w-[31%] mb-3 bg-slate-800/80 p-2.5 rounded-2xl border border-slate-700/60 active:bg-slate-700"
                     >
-                      {app.appName}
-                    </Text>
-                  </Pressable>
-                ))}
-              </View>
-            )}
+                      {app.icon ? (
+                        <Image
+                          source={{ uri: `data:image/png;base64,${app.icon}` }}
+                          style={{ width: 38, height: 38, borderRadius: 10 }}
+                        />
+                      ) : (
+                        <Ionicons
+                          name="apps"
+                          size={38}
+                          color={getAppColor(app.appName)}
+                        />
+                      )}
+                      <Text
+                        allowFontScaling={false}
+                        numberOfLines={1}
+                        className="text-white text-[10px] font-bold mt-1.5 text-center w-full"
+                      >
+                        {app.appName}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+              )}
+            </View>
           </View>
 
-          {/* Earned Emergency Pass Unlock Button */}
+          {/* Bottom Emergency Pass Button (Wrapped Text so it NEVER overflows!) */}
           <Pressable
             onPress={() => setEmergencyModalVisible(true)}
-            className={`mt-6 py-4 px-5 rounded-2xl border flex-row items-center justify-center ${
+            className={`mt-4 py-3.5 px-4 rounded-2xl border flex-row items-center justify-center ${
               emergencyPasses > 0
                 ? "bg-amber-500/15 border-amber-500/40 active:bg-amber-500/25"
-                : "bg-slate-900 border-slate-800 opacity-60"
+                : "bg-slate-900 border-slate-800"
             }`}
           >
             <Ionicons
@@ -830,13 +840,13 @@ export default function StrictFocusScreen() {
             />
             <Text
               allowFontScaling={false}
-              className={`font-bold text-xs ml-2 ${
-                emergencyPasses > 0 ? "text-amber-300" : "text-slate-500"
+              className={`font-bold text-xs ml-2 flex-1 text-center ${
+                emergencyPasses > 0 ? "text-amber-300" : "text-slate-400"
               }`}
             >
               {emergencyPasses > 0
-                ? `Emergency Unlock (১টি পাস কাটবে • জমা আছে: ${emergencyPasses}/5)`
-                : `Emergency Unlock লকড (পাস: 0/5 • ৩ দিন পূর্ণ করে পাস পান)`}
+                ? `Emergency Unlock (১টি পাস কাটবে • জমা: ${emergencyPasses}/5)`
+                : `Emergency Unlock লকড (পাস: 0/5 • ৩ দিন লক পূর্ণ করে পাস পান)`}
             </Text>
           </Pressable>
         </ScrollView>
@@ -847,14 +857,14 @@ export default function StrictFocusScreen() {
           transparent
           animationType="fade"
         >
-          <View className="flex-1 bg-black/80 justify-center items-center px-6">
-            <View className="bg-slate-900 w-full rounded-3xl p-6 border border-slate-700 items-center">
-              <View className="w-16 h-16 rounded-full bg-amber-500/20 border border-amber-500/40 items-center justify-center mb-4">
-                <Ionicons name="warning" size={32} color="#FBBF24" />
+          <View className="flex-1 bg-black/80 justify-center items-center px-5">
+            <View className="bg-slate-900 w-full rounded-3xl p-5 border border-slate-700 items-center">
+              <View className="w-14 h-14 rounded-full bg-amber-500/20 border border-amber-500/40 items-center justify-center mb-3">
+                <Ionicons name="warning" size={28} color="#FBBF24" />
               </View>
               <Text
                 allowFontScaling={false}
-                className="text-white font-black text-xl text-center mb-2"
+                className="text-white font-black text-lg text-center mb-2"
               >
                 {emergencyPasses > 0
                   ? "১টি Emergency Pass খরচ করবেন?"
@@ -862,11 +872,11 @@ export default function StrictFocusScreen() {
               </Text>
               <Text
                 allowFontScaling={false}
-                className="text-slate-400 text-xs text-center leading-5 mb-6"
+                className="text-slate-400 text-xs text-center leading-5 mb-5"
               >
                 {emergencyPasses > 0
                   ? `এখন লক ভাঙলে আপনার জমানো ${emergencyPasses}টি পাস থেকে ১টি পাস কেটে নেওয়া হবে (বাকি থাকবে ${emergencyPasses - 1}টি) এবং আপনার চলমান ৩ দিনের স্ট্রিক আবার ০ হয়ে যাবে!`
-                  : `আপনার পাস সংখ্যা এখন 0। টানা ৩ দিন নিয়ম মেনে লক পূর্ণ করলে ১টি করে পাস পাবেন (সর্বোচ্চ ৫টি)।`}
+                  : `আপনার পাস সংখ্যা এখন 0। টানা ৩ দিন (কমপক্ষে ৩০ মিনিট করে) নিয়ম মেনে লক পূর্ণ করলে ১টি করে পাস পাবেন (সর্বোচ্চ ৫টি)।`}
               </Text>
 
               <View className="flex-row gap-3 w-full">
@@ -876,7 +886,7 @@ export default function StrictFocusScreen() {
                 >
                   <Text
                     allowFontScaling={false}
-                    className="text-white font-bold text-sm"
+                    className="text-white font-bold text-xs"
                   >
                     ফিরে যান
                   </Text>
@@ -888,7 +898,7 @@ export default function StrictFocusScreen() {
                   >
                     <Text
                       allowFontScaling={false}
-                      className="text-white font-bold text-sm"
+                      className="text-white font-bold text-xs"
                     >
                       হ্যাঁ, ১টি পাস কাটুন
                     </Text>
@@ -903,7 +913,7 @@ export default function StrictFocusScreen() {
   }
 
   // =========================================================================
-  // SETUP & CONFIGURATION SCREEN
+  // SETUP & CONFIGURATION SCREEN (Overflow-Proof & SafeArea Protected)
   // =========================================================================
   const allPermsReady =
     permState.accessibility && permState.overlay && permState.deviceAdmin;
@@ -911,48 +921,51 @@ export default function StrictFocusScreen() {
   return (
     <SafeAreaView
       className="flex-1 bg-[#0F172A]"
-      edges={["top", "left", "right"]}
+      edges={["top", "bottom", "left", "right"]}
     >
       <StatusBar style="light" />
 
       {/* HEADER */}
-      <View className="px-6 pt-3 pb-3 flex-row items-center justify-between">
-        <View className="flex-row items-center">
-          <View className="w-10 h-10 bg-indigo-500/20 rounded-2xl items-center justify-center mr-3 border border-indigo-500/30">
-            <Ionicons name="shield-checkmark" size={22} color="#818CF8" />
-          </View>
-          <View>
-            <Text
-              allowFontScaling={false}
-              className="text-2xl font-black text-white tracking-tight"
-            >
-              Strict Focus Lock
-            </Text>
-            <Text
-              allowFontScaling={false}
-              className="text-slate-400 text-xs font-medium"
-            >
-              Schedule Lock • 25m/5m Session • Shorts & URL Filter
-            </Text>
-          </View>
+      <View className="px-5 pt-3 pb-3 flex-row items-center">
+        <View className="w-10 h-10 bg-indigo-500/20 rounded-2xl items-center justify-center mr-3 border border-indigo-500/30">
+          <Ionicons name="shield-checkmark" size={22} color="#818CF8" />
+        </View>
+        <View className="flex-1">
+          <Text
+            allowFontScaling={false}
+            numberOfLines={1}
+            className="text-xl font-black text-white tracking-tight"
+          >
+            Strict Focus Lock
+          </Text>
+          <Text
+            allowFontScaling={false}
+            numberOfLines={1}
+            className="text-slate-400 text-xs font-medium"
+          >
+            Schedule • 25m/5m Session • Shorts & URL Filter
+          </Text>
         </View>
       </View>
 
       <ScrollView
-        className="flex-1 px-5"
+        className="flex-1 px-4"
         showsVerticalScrollIndicator={false}
-        contentContainerStyle={{ paddingBottom: 48 }}
+        contentContainerStyle={{
+          paddingBottom: Math.max(40, insets.bottom + 24),
+        }}
       >
         {/* 🎟️ GAMIFIED EMERGENCY PASS & 3-DAY STREAK CARD */}
         <View className="bg-slate-800/90 p-4 rounded-3xl border border-slate-700 mb-5">
           <View className="flex-row items-center justify-between mb-3">
-            <View className="flex-row items-center">
-              <View className="w-9 h-9 rounded-xl bg-amber-500/20 items-center justify-center mr-3">
-                <Ionicons name="ticket" size={20} color="#FBBF24" />
+            <View className="flex-row items-center flex-1 pr-2">
+              <View className="w-9 h-9 rounded-xl bg-amber-500/20 items-center justify-center mr-2.5">
+                <Ionicons name="ticket" size={18} color="#FBBF24" />
               </View>
-              <View>
+              <View className="flex-1">
                 <Text
                   allowFontScaling={false}
+                  numberOfLines={1}
                   className="text-white font-bold text-sm"
                 >
                   Emergency Unlock Passes
@@ -961,28 +974,27 @@ export default function StrictFocusScreen() {
                   allowFontScaling={false}
                   className="text-slate-400 text-[11px]"
                 >
-                  টানা ৩ দিন লক পূর্ণ করলে +1 Pass (সর্বোচ্চ ৫টি)
+                  টানা ৩ দিন (৩০+ মি.) লক পূর্ণ করলে +1 Pass
                 </Text>
               </View>
             </View>
             <View className="bg-amber-500/20 px-3 py-1.5 rounded-xl border border-amber-500/40">
               <Text
                 allowFontScaling={false}
-                className="text-amber-300 font-black text-base"
+                className="text-amber-300 font-black text-sm"
               >
                 {emergencyPasses} / 5
               </Text>
             </View>
           </View>
 
-          {/* 3-Day Progress Bar */}
           <View className="bg-slate-900 p-3 rounded-2xl border border-slate-700/60">
             <View className="flex-row justify-between items-center mb-2">
               <Text
                 allowFontScaling={false}
-                className="text-slate-300 text-xs font-bold"
+                className="text-slate-300 text-[11px] font-bold flex-1 pr-2"
               >
-                🔥 পরবর্তী পাসের অগ্রগতি (৩ দিনের স্ট্রিক)
+                🔥 স্ট্রিক (দিনে সর্বোচ্চ ১টি • কমপক্ষে ৩০ মি. লক)
               </Text>
               <Text
                 allowFontScaling={false}
@@ -1017,8 +1029,8 @@ export default function StrictFocusScreen() {
               allowFontScaling={false}
               className="text-slate-400 text-xs mb-3"
             >
-              হোম বাটন চাপলে ০ সেকেন্ডে লক স্ক্রিনে টেনে আনতে এবং আনইনস্টল বন্ধ
-              রাখতে নিচের সুইচগুলো অন করুন:
+              হোম বাটন চাপলে ০ সেকেন্ডে লক স্ক্রিনে টেনে আনতে নিচের সুইচগুলো অন
+              করুন:
             </Text>
 
             <Pressable
@@ -1038,13 +1050,13 @@ export default function StrictFocusScreen() {
                     allowFontScaling={false}
                     className="text-white font-bold text-xs"
                   >
-                    1. Display Over Other Apps (0ms Pull-Back)
+                    1. Display Over Other Apps
                   </Text>
                   <Text
                     allowFontScaling={false}
                     className="text-slate-400 text-[10px]"
                   >
-                    অন্য অ্যাপে গেলে দেরি না করে সাথে সাথে লক অ্যাপে টেনে আনে
+                    অন্য অ্যাপে গেলে সাথে সাথে লক অ্যাপে টেনে আনে
                   </Text>
                 </View>
               </View>
@@ -1075,7 +1087,7 @@ export default function StrictFocusScreen() {
                     allowFontScaling={false}
                     className="text-white font-bold text-xs"
                   >
-                    2. Accessibility Service (Shorts & Chrome Filter)
+                    2. Accessibility Service
                   </Text>
                   <Text
                     allowFontScaling={false}
@@ -1112,7 +1124,7 @@ export default function StrictFocusScreen() {
                     allowFontScaling={false}
                     className="text-white font-bold text-xs"
                   >
-                    3. Device Administrator (Uninstall Protection)
+                    3. Device Administrator
                   </Text>
                   <Text
                     allowFontScaling={false}
@@ -1133,18 +1145,18 @@ export default function StrictFocusScreen() {
         )}
 
         {/* SECTION 1: SESSION LOCK (WITH 25M FOCUS + 5M BREAK POMODORO CYCLE) */}
-        <View className="bg-slate-800 p-5 rounded-[32px] border border-slate-700 mb-6">
+        <View className="bg-slate-800 p-4 rounded-[28px] border border-slate-700 mb-5">
           <Text
             allowFontScaling={false}
-            className="text-white font-bold text-xl mb-1 text-center"
+            className="text-white font-bold text-lg mb-1 text-center"
           >
             Session Lock (One-Time)
           </Text>
           <Text
             allowFontScaling={false}
-            className="text-slate-400 text-xs text-center mb-5"
+            className="text-slate-400 text-xs text-center mb-4"
           >
-            মোট লকের সময় দিন (প্রতি ২৫ মিনিট পর ৫ মিনিট ফ্রি ব্রেক পাবেন)
+            মোট লকের সময় দিন (১ স্ট্রিক পেতে কমপক্ষে ৩০ মিনিট দিন)
           </Text>
 
           <View className="flex-row items-center justify-center mb-4">
@@ -1156,9 +1168,9 @@ export default function StrictFocusScreen() {
               }
               keyboardType="number-pad"
               maxLength={3}
-              placeholder="120"
+              placeholder="60"
               placeholderTextColor="#475569"
-              className="text-white text-4xl font-black bg-slate-900 border border-slate-700 rounded-2xl w-32 text-center py-2.5"
+              className="text-white text-3xl font-black bg-slate-900 border border-slate-700 rounded-2xl w-28 text-center py-2"
             />
             <Text
               allowFontScaling={false}
@@ -1168,9 +1180,9 @@ export default function StrictFocusScreen() {
             </Text>
           </View>
 
-          {/* Quick Duration Chips */}
-          <View className="flex-row justify-center gap-2 mb-5">
+          <View className="flex-row justify-center flex-wrap gap-2 mb-4">
             {[
+              { label: "30m", val: "30" },
               { label: "1 Hour", val: "60" },
               { label: "2 Hours", val: "120" },
               { label: "4 Hours", val: "240" },
@@ -1178,7 +1190,7 @@ export default function StrictFocusScreen() {
               <Pressable
                 key={preset.val}
                 onPress={() => setCustomDuration(preset.val)}
-                className={`px-3.5 py-1.5 rounded-full border ${
+                className={`px-3 py-1.5 rounded-full border ${
                   customDuration === preset.val
                     ? "bg-indigo-500/20 border-indigo-400"
                     : "bg-slate-900 border-slate-700"
@@ -1198,8 +1210,7 @@ export default function StrictFocusScreen() {
             ))}
           </View>
 
-          {/* 25m + 5m Toggle */}
-          <View className="bg-slate-900/80 p-3.5 rounded-2xl border border-slate-700/70 flex-row items-center justify-between mb-6">
+          <View className="bg-slate-900/80 p-3 rounded-2xl border border-slate-700/70 flex-row items-center justify-between mb-5">
             <View className="flex-1 pr-3">
               <Text
                 allowFontScaling={false}
@@ -1211,7 +1222,7 @@ export default function StrictFocusScreen() {
                 allowFontScaling={false}
                 className="text-slate-400 text-[11px] mt-0.5"
               >
-                প্রতি ২৫ মিনিট কড়া লকের পর ৫ মিনিট ফ্রি অ্যাক্সেস ও অটো-লক
+                প্রতি ২৫ মিনিট কড়া লকের পর ৫ মিনিট ফ্রি ব্রেক পাবেন
               </Text>
             </View>
             <Switch
@@ -1222,7 +1233,6 @@ export default function StrictFocusScreen() {
             />
           </View>
 
-          {/* HOLD BUTTON */}
           <View className="items-center justify-center">
             <Animated.View style={{ transform: [{ scale: scaleAnim }] }}>
               <Pressable
@@ -1234,7 +1244,7 @@ export default function StrictFocusScreen() {
                   handlePressOut();
                 }}
                 delayLongPress={1500}
-                className="items-center justify-center h-28 w-28 rounded-full border-[3px] border-slate-700 bg-slate-900 overflow-hidden"
+                className="items-center justify-center h-24 w-24 rounded-full border-[3px] border-slate-700 bg-slate-900 overflow-hidden"
               >
                 <Animated.View
                   className="absolute w-full h-full rounded-full bg-rose-500"
@@ -1255,13 +1265,13 @@ export default function StrictFocusScreen() {
                 />
                 <Ionicons
                   name="lock-closed"
-                  size={36}
+                  size={32}
                   color="white"
                   style={{ zIndex: 10 }}
                 />
                 <Text
                   allowFontScaling={false}
-                  className="text-white/80 font-bold text-[10px] tracking-widest mt-1 z-10"
+                  className="text-white/80 font-bold text-[9px] tracking-widest mt-1 z-10"
                 >
                   HOLD 1.5s
                 </Text>
@@ -1271,7 +1281,7 @@ export default function StrictFocusScreen() {
         </View>
 
         {/* SECTION 2: WHITELISTED APPS (MAX 6 APPS) */}
-        <View className="flex-row justify-between items-center mb-3 px-2">
+        <View className="flex-row justify-between items-center mb-2.5 px-1">
           <Text
             allowFontScaling={false}
             className="text-slate-400 font-bold uppercase text-xs tracking-wider"
@@ -1288,7 +1298,7 @@ export default function StrictFocusScreen() {
           </Pressable>
         </View>
 
-        <View className="bg-slate-800 p-4 rounded-[24px] border border-slate-700 mb-6">
+        <View className="bg-slate-800 p-4 rounded-3xl border border-slate-700 mb-5">
           {selectedApps.length === 0 ? (
             <Text
               allowFontScaling={false}
@@ -1322,7 +1332,8 @@ export default function StrictFocusScreen() {
                   )}
                   <Text
                     allowFontScaling={false}
-                    className="text-white font-bold ml-3 flex-1 text-sm"
+                    numberOfLines={1}
+                    className="text-white font-bold ml-3 flex-1 text-sm pr-2"
                   >
                     {app.appName}
                   </Text>
@@ -1335,13 +1346,14 @@ export default function StrictFocusScreen() {
         </View>
 
         {/* SECTION 3: CHROME WEBSITES & YOUTUBE LONG VIDEO QUOTA */}
-        <View className="bg-slate-800 p-5 rounded-[28px] border border-slate-700 mb-6">
-          <View className="flex-row items-center justify-between mb-3">
-            <View className="flex-row items-center">
-              <Ionicons name="globe-outline" size={20} color="#38BDF8" />
+        <View className="bg-slate-800 p-4 rounded-3xl border border-slate-700 mb-5">
+          <View className="flex-row items-center justify-between mb-2">
+            <View className="flex-row items-center flex-1 pr-2">
+              <Ionicons name="globe-outline" size={18} color="#38BDF8" />
               <Text
                 allowFontScaling={false}
-                className="text-white font-bold text-sm ml-2"
+                numberOfLines={1}
+                className="text-white font-bold text-xs ml-2 flex-1"
               >
                 Chrome অনুমোদিত ওয়েবসাইট ({allowedDomains.length})
               </Text>
@@ -1360,31 +1372,32 @@ export default function StrictFocusScreen() {
           </View>
           <Text
             allowFontScaling={false}
-            className="text-slate-400 text-xs mb-4"
+            className="text-slate-400 text-xs mb-3 leading-4"
           >
-            অনুমোদিত ডোমেইন: {allowedDomains.join(", ")}
+            {allowedDomains.join(", ")}
           </Text>
 
-          <View className="border-t border-slate-700 pt-4">
+          <View className="border-t border-slate-700 pt-3">
             <View className="flex-row items-center mb-2">
-              <Ionicons name="logo-youtube" size={20} color="#EF4444" />
+              <Ionicons name="logo-youtube" size={18} color="#EF4444" />
               <Text
                 allowFontScaling={false}
-                className="text-white font-bold text-sm ml-2"
+                numberOfLines={1}
+                className="text-white font-bold text-xs ml-2 flex-1"
               >
                 YouTube লং ভিডিও লিমিট (Shorts ১০০% ব্লক)
               </Text>
             </View>
-            <View className="flex-row gap-2 mt-2">
+            <View className="flex-row gap-2 mt-1">
               {[
-                { label: "1 Hour (60m)", val: 60 },
-                { label: "1.5 Hours (90m)", val: 90 },
-                { label: "2 Hours (120m)", val: 120 },
+                { label: "60m (1h)", val: 60 },
+                { label: "90m (1.5h)", val: 90 },
+                { label: "120m (2h)", val: 120 },
               ].map((opt) => (
                 <Pressable
                   key={opt.val}
                   onPress={() => void updateYtQuota(opt.val)}
-                  className={`flex-1 py-2.5 rounded-xl items-center border ${
+                  className={`flex-1 py-2.5 px-1 rounded-xl items-center justify-center border ${
                     ytLimitMinutes === opt.val
                       ? "bg-rose-500/20 border-rose-500"
                       : "bg-slate-900 border-slate-700"
@@ -1392,7 +1405,8 @@ export default function StrictFocusScreen() {
                 >
                   <Text
                     allowFontScaling={false}
-                    className={`text-xs font-bold ${
+                    numberOfLines={1}
+                    className={`text-[11px] font-bold ${
                       ytLimitMinutes === opt.val
                         ? "text-rose-400"
                         : "text-slate-400"
@@ -1407,7 +1421,7 @@ export default function StrictFocusScreen() {
         </View>
 
         {/* SECTION 4: DAILY RECURRING SCHEDULE LOCK */}
-        <View className="flex-row justify-between items-center mb-3 px-2">
+        <View className="flex-row justify-between items-center mb-2.5 px-1">
           <Text
             allowFontScaling={false}
             className="text-slate-400 font-bold uppercase text-xs tracking-wider"
@@ -1442,19 +1456,19 @@ export default function StrictFocusScreen() {
         {schedules.map((schedule, index) => (
           <View
             key={schedule.id}
-            className="bg-slate-800 p-5 rounded-[32px] border border-slate-700 mb-4"
+            className="bg-slate-800 p-4 rounded-3xl border border-slate-700 mb-4"
           >
-            <View className="flex-row items-center justify-between mb-5">
-              <View className="flex-1 pr-4">
+            <View className="flex-row items-center justify-between mb-4">
+              <View className="flex-1 pr-3">
                 <Text
                   allowFontScaling={false}
-                  className="text-white font-bold text-lg mb-0.5"
+                  className="text-white font-bold text-base mb-0.5"
                 >
                   Schedule Lock {index + 1}
                 </Text>
                 <Text
                   allowFontScaling={false}
-                  className="text-slate-400 text-xs"
+                  className="text-slate-400 text-[11px]"
                 >
                   প্রতিদিন নির্ধারিত সময়ে অটোমেটিক একটানা কড়া লক
                 </Text>
@@ -1473,7 +1487,7 @@ export default function StrictFocusScreen() {
               />
             </View>
 
-            <View className="bg-slate-900/60 p-4 rounded-[24px] border border-slate-700/50 mb-4 flex-row items-center justify-between">
+            <View className="bg-slate-900/60 p-3.5 rounded-2xl border border-slate-700/50 mb-4 flex-row items-center justify-between">
               <Pressable
                 onPress={() => {
                   setEditingSchedule({ id: schedule.id, type: "start" });
@@ -1483,18 +1497,18 @@ export default function StrictFocusScreen() {
               >
                 <Text
                   allowFontScaling={false}
-                  className="text-slate-500 text-xs mb-0.5 font-bold uppercase"
+                  className="text-slate-500 text-[10px] mb-0.5 font-bold uppercase"
                 >
                   শুরু হবে
                 </Text>
                 <Text
                   allowFontScaling={false}
-                  className="text-indigo-400 font-black text-xl"
+                  className="text-indigo-400 font-black text-lg"
                 >
                   {formatTime(schedule.startTime)}
                 </Text>
               </Pressable>
-              <Ionicons name="arrow-forward" size={20} color="#475569" />
+              <Ionicons name="arrow-forward" size={18} color="#475569" />
               <Pressable
                 onPress={() => {
                   setEditingSchedule({ id: schedule.id, type: "end" });
@@ -1504,20 +1518,20 @@ export default function StrictFocusScreen() {
               >
                 <Text
                   allowFontScaling={false}
-                  className="text-slate-500 text-xs mb-0.5 font-bold uppercase"
+                  className="text-slate-500 text-[10px] mb-0.5 font-bold uppercase"
                 >
                   শেষ হবে
                 </Text>
                 <Text
                   allowFontScaling={false}
-                  className="text-rose-400 font-black text-xl"
+                  className="text-rose-400 font-black text-lg"
                 >
                   {formatTime(schedule.endTime)}
                 </Text>
               </Pressable>
             </View>
 
-            <View className="flex-row justify-between">
+            <View className="flex-row justify-between px-0.5">
               {DAYS.map((day) => {
                 const isActive = schedule.activeDays.includes(day.id);
                 return (
@@ -1534,7 +1548,7 @@ export default function StrictFocusScreen() {
                       setSchedules(updated);
                       await saveAllSchedules(updated, true);
                     }}
-                    className={`w-9 h-9 rounded-full items-center justify-center border ${
+                    className={`w-8 h-8 rounded-full items-center justify-center border ${
                       isActive
                         ? "bg-indigo-500 border-indigo-400"
                         : "bg-slate-900 border-slate-700"
@@ -1542,7 +1556,7 @@ export default function StrictFocusScreen() {
                   >
                     <Text
                       allowFontScaling={false}
-                      className={`font-bold text-xs ${isActive ? "text-white" : "text-slate-500"}`}
+                      className={`font-bold text-[11px] ${isActive ? "text-white" : "text-slate-500"}`}
                     >
                       {day.label}
                     </Text>
@@ -1558,9 +1572,9 @@ export default function StrictFocusScreen() {
                   setSchedules(updated);
                   await saveAllSchedules(updated, true);
                 }}
-                className="mt-4 py-2 flex-row justify-center items-center"
+                className="mt-3 py-1.5 flex-row justify-center items-center"
               >
-                <Ionicons name="trash-outline" size={16} color="#EF4444" />
+                <Ionicons name="trash-outline" size={15} color="#EF4444" />
                 <Text className="text-rose-500 font-bold text-xs ml-1">
                   মুছে ফেলুন
                 </Text>
@@ -1571,7 +1585,7 @@ export default function StrictFocusScreen() {
 
         <Pressable
           onPress={() => void saveAllSchedules(schedules, false)}
-          className="bg-indigo-600 py-4 rounded-[16px] items-center justify-center active:bg-indigo-700 mb-6"
+          className="bg-indigo-600 py-4 rounded-2xl items-center justify-center active:bg-indigo-700 mb-4"
         >
           <Text
             allowFontScaling={false}
@@ -1584,13 +1598,16 @@ export default function StrictFocusScreen() {
 
       {/* APP PICKER MODAL (MAX 6 APPS) */}
       <Modal visible={appModalVisible} transparent animationType="slide">
-        <View className="flex-1 bg-black/70 justify-end">
-          <View className="bg-slate-900 w-full rounded-t-[32px] p-6 border-t border-slate-700 max-h-[85%]">
-            <View className="flex-row justify-between items-center mb-4">
-              <View>
+        <View className="flex-1 bg-black/75 justify-end">
+          <View
+            style={{ paddingBottom: Math.max(20, insets.bottom + 12) }}
+            className="bg-slate-900 w-full rounded-t-[28px] px-5 pt-5 border-t border-slate-700 max-h-[85%]"
+          >
+            <View className="flex-row justify-between items-center mb-3">
+              <View className="flex-1 pr-2">
                 <Text
                   allowFontScaling={false}
-                  className="text-white font-bold text-xl"
+                  className="text-white font-bold text-lg"
                 >
                   Select Allowed Apps ({selectedApps.length}/{MAX_SELECTED_APPS})
                 </Text>
@@ -1617,23 +1634,23 @@ export default function StrictFocusScreen() {
               placeholderTextColor="#64748B"
               value={searchQuery}
               onChangeText={setSearchQuery}
-              className="bg-slate-800 text-white px-4 py-3 rounded-xl mb-4 border border-slate-700"
+              className="bg-slate-800 text-white px-4 py-2.5 rounded-xl mb-3 border border-slate-700 text-sm"
             />
 
-            <ScrollView showsVerticalScrollIndicator={false} className="mb-4">
+            <ScrollView showsVerticalScrollIndicator={false} className="mb-3">
               {filteredApps.map((app) => {
                 const isChecked = selectedApps.includes(app.packageName);
                 return (
                   <Pressable
                     key={app.packageName}
                     onPress={() => toggleAppSelection(app.packageName)}
-                    className={`p-3.5 rounded-2xl mb-2 flex-row items-center justify-between border ${
+                    className={`p-3 rounded-2xl mb-2 flex-row items-center justify-between border ${
                       isChecked
                         ? "bg-indigo-500/15 border-indigo-500/50"
                         : "bg-slate-800 border-slate-700"
                     }`}
                   >
-                    <View className="flex-row items-center flex-1 pr-4">
+                    <View className="flex-row items-center flex-1 pr-3">
                       {app.icon ? (
                         <Image
                           source={{ uri: `data:image/png;base64,${app.icon}` }}
@@ -1666,7 +1683,7 @@ export default function StrictFocusScreen() {
 
             <Pressable
               onPress={() => void confirmAndSaveAllowedApps()}
-              className="bg-indigo-600 py-3.5 rounded-2xl items-center justify-center mb-4"
+              className="bg-indigo-600 py-3.5 rounded-2xl items-center justify-center"
             >
               <Text
                 allowFontScaling={false}
@@ -1681,12 +1698,18 @@ export default function StrictFocusScreen() {
 
       {/* CHROME ALLOWED DOMAINS MODAL */}
       <Modal visible={domainModalVisible} transparent animationType="slide">
-        <View className="flex-1 bg-black/75 justify-end">
-          <View className="bg-slate-900 w-full rounded-t-[32px] p-6 border-t border-slate-700 max-h-[80%]">
-            <View className="flex-row justify-between items-center mb-4">
+        <KeyboardAvoidingView
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          className="flex-1 bg-black/75 justify-end"
+        >
+          <View
+            style={{ paddingBottom: Math.max(20, insets.bottom + 12) }}
+            className="bg-slate-900 w-full rounded-t-[28px] px-5 pt-5 border-t border-slate-700 max-h-[82%]"
+          >
+            <View className="flex-row justify-between items-center mb-3">
               <Text
                 allowFontScaling={false}
-                className="text-white font-bold text-lg"
+                className="text-white font-bold text-base flex-1 pr-2"
               >
                 Chrome অনুমোদিত ওয়েবসাইট লিস্ট
               </Text>
@@ -1698,29 +1721,29 @@ export default function StrictFocusScreen() {
               </Pressable>
             </View>
 
-            <View className="flex-row gap-2 mb-4">
+            <View className="flex-row gap-2 mb-3">
               <TextInput
-                placeholder="যেমন: leetcode.com বা docs.google.com"
+                placeholder="যেমন: leetcode.com"
                 placeholderTextColor="#64748B"
                 value={newDomainInput}
                 onChangeText={setNewDomainInput}
                 autoCapitalize="none"
-                className="flex-1 bg-slate-800 text-white px-4 py-3 rounded-xl border border-slate-700"
+                className="flex-1 bg-slate-800 text-white px-3.5 py-2.5 rounded-xl border border-slate-700 text-sm"
               />
               <Pressable
                 onPress={() => void addDomain()}
-                className="bg-indigo-600 px-5 rounded-xl items-center justify-center"
+                className="bg-indigo-600 px-4 rounded-xl items-center justify-center"
               >
                 <Text
                   allowFontScaling={false}
-                  className="text-white font-bold text-sm"
+                  className="text-white font-bold text-xs"
                 >
                   Add
                 </Text>
               </Pressable>
             </View>
 
-            <ScrollView className="mb-4">
+            <ScrollView showsVerticalScrollIndicator={false}>
               {allowedDomains.map((dom) => (
                 <View
                   key={dom}
@@ -1728,7 +1751,8 @@ export default function StrictFocusScreen() {
                 >
                   <Text
                     allowFontScaling={false}
-                    className="text-white font-medium text-sm"
+                    numberOfLines={1}
+                    className="text-white font-medium text-xs flex-1 pr-2"
                   >
                     🌐 {dom}
                   </Text>
@@ -1739,7 +1763,7 @@ export default function StrictFocusScreen() {
               ))}
             </ScrollView>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       {showPicker && editingSchedule && (

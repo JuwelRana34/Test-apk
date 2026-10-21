@@ -13,23 +13,29 @@ import {
   Alert,
   AppState,
   FlatList,
+  KeyboardAvoidingView,
   Linking,
   Modal,
   NativeModules,
   PermissionsAndroid,
+  Platform,
   Pressable,
+  ScrollView,
   Text,
   TextInput,
   View,
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import {
+  SafeAreaView,
+  useSafeAreaInsets,
+} from "react-native-safe-area-context";
 import {
   ContactForNotification,
   registerExpoPushTokenOnlineOffline,
   scheduleContactNotificationsOffline,
+  syncLocalDataToCloudIfOnline,
   triggerInstantContactNotification,
 } from "../../lib/supabase";
-import { syncLocalDataToCloudIfOnline } from "../../lib/supabase";
 
 const STORAGE_KEY = "@networking_contacts";
 const STATS_KEY = "@networking_stats";
@@ -68,9 +74,10 @@ const getCategoryConfig = (cat: ContactCategoryType) => {
         color: "#F43F5E",
         bg: "bg-rose-500/20",
         border: "border-rose-500/40",
-        label: "Category 1: পরিবার ও ভিআইপি (৫ দিন পর পর)",
-        shortLabel: "Cat 1: পরিবার (5d)",
-        intervalDays: 5,
+        label: "Category 1: পরিবার ও ভিআইপি (৩–৭ দিন র‍্যান্ডম)",
+        shortLabel: "Cat 1: পরিবার (~5d)",
+        minDays: 3,
+        maxDays: 7,
       };
     case "friends":
       return {
@@ -78,9 +85,10 @@ const getCategoryConfig = (cat: ContactCategoryType) => {
         color: "#FBBF24",
         bg: "bg-amber-500/20",
         border: "border-amber-500/40",
-        label: "Category 2: ঘনিষ্ঠ বন্ধু (১৫ দিন পর পর)",
-        shortLabel: "Cat 2: বন্ধু (15d)",
-        intervalDays: 15,
+        label: "Category 2: ঘনিষ্ঠ বন্ধু (১১–১৮ দিন র‍্যান্ডম)",
+        shortLabel: "Cat 2: বন্ধু (~15d)",
+        minDays: 11,
+        maxDays: 18,
       };
     case "network":
     default:
@@ -89,9 +97,10 @@ const getCategoryConfig = (cat: ContactCategoryType) => {
         color: "#38BDF8",
         bg: "bg-sky-500/20",
         border: "border-sky-500/40",
-        label: "Category 3: পরিচিত ও আত্মীয় (৩০ দিন পর পর)",
-        shortLabel: "Cat 3: পরিচিত (30d)",
-        intervalDays: 30,
+        label: "Category 3: পরিচিত ও আত্মীয় (২৪–৩৬ দিন র‍্যান্ডম)",
+        shortLabel: "Cat 3: পরিচিত (~30d)",
+        minDays: 24,
+        maxDays: 36,
       };
   }
 };
@@ -100,6 +109,11 @@ const normalizeCategory = (raw: string): ContactCategoryType => {
   if (raw === "family" || raw === "close") return "family";
   if (raw === "friends" || raw === "important") return "friends";
   return "network";
+};
+
+const getDayKey = (timestamp: number) => {
+  const d = new Date(timestamp);
+  return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
 };
 
 const formatDate = (timestamp: number) => {
@@ -119,10 +133,63 @@ const formatDate = (timestamp: number) => {
     "Nov",
     "Dec",
   ];
-  return `${months[date.getMonth()]} ${date.getDate()}`;
+  return `${months[date.getMonth()]} ${date.getDate()} (7:00 PM)`;
+};
+
+const calculateRandomUniqueDueDate = (
+  category: ContactCategoryType,
+  currentList: RelationshipContact[],
+  excludeContactId?: string,
+): number => {
+  const cfg = getCategoryConfig(category);
+  const usedDayKeys = new Set<string>();
+
+  currentList.forEach((c) => {
+    if (c.id !== excludeContactId && c.nextDueDate > 0) {
+      usedDayKeys.add(getDayKey(c.nextDueDate));
+    }
+  });
+
+  const candidateOffsets: number[] = [];
+  for (let d = cfg.minDays; d <= cfg.maxDays; d++) {
+    candidateOffsets.push(d);
+  }
+  for (let i = candidateOffsets.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const temp = candidateOffsets[i];
+    candidateOffsets[i] = candidateOffsets[j];
+    candidateOffsets[j] = temp;
+  }
+
+  for (const offset of candidateOffsets) {
+    const candidateDate = new Date();
+    candidateDate.setDate(candidateDate.getDate() + offset);
+    candidateDate.setHours(19, 0, 0, 0);
+    if (!usedDayKeys.has(getDayKey(candidateDate.getTime()))) {
+      return candidateDate.getTime();
+    }
+  }
+
+  let extraOffset = cfg.maxDays + 1;
+  while (extraOffset < cfg.maxDays + 90) {
+    const candidateDate = new Date();
+    candidateDate.setDate(candidateDate.getDate() + extraOffset);
+    candidateDate.setHours(19, 0, 0, 0);
+    if (!usedDayKeys.has(getDayKey(candidateDate.getTime()))) {
+      return candidateDate.getTime();
+    }
+    extraOffset++;
+  }
+
+  const fallback = new Date();
+  fallback.setDate(fallback.getDate() + candidateOffsets[0]);
+  fallback.setHours(19, 0, 0, 0);
+  return fallback.getTime();
 };
 
 export default function SmartNetworkingScreen() {
+  const insets = useSafeAreaInsets();
+
   const [contacts, setContacts] = useState<RelationshipContact[]>([]);
   const [todayDueContacts, setTodayDueContacts] = useState<
     RelationshipContact[]
@@ -149,39 +216,6 @@ export default function SmartNetworkingScreen() {
   const pendingCallContactIdRef = useRef<string | null>(null);
   const appState = useRef(AppState.currentState);
 
-  // Smart Rotation Algorithm: calculates next due date by category and spreads out contacts so max 2 fall on the same day
-  const calculateNextDueDate = useCallback(
-    (
-      category: ContactCategoryType,
-      currentList: RelationshipContact[],
-      dueImmediately = false,
-    ) => {
-      if (dueImmediately) {
-        return new Date().setHours(10, 0, 0, 0);
-      }
-
-      const config = getCategoryConfig(category);
-      const targetDate = new Date();
-      targetDate.setDate(targetDate.getDate() + config.intervalDays);
-      targetDate.setHours(0, 0, 0, 0);
-
-      const dateCounts = new Map<number, number>();
-      currentList.forEach((c) => {
-        if (c.nextDueDate > 0) {
-          const d = new Date(c.nextDueDate).setHours(0, 0, 0, 0);
-          dateCounts.set(d, (dateCounts.get(d) || 0) + 1);
-        }
-      });
-
-      while ((dateCounts.get(targetDate.getTime()) || 0) >= 2) {
-        targetDate.setDate(targetDate.getDate() + 1);
-      }
-      targetDate.setHours(10, 0, 0, 0);
-      return targetDate.getTime();
-    },
-    [],
-  );
-
   const loadContactsAndScheduleNotifications = useCallback(async () => {
     try {
       const [rawContacts, rawStats] = await Promise.all([
@@ -195,10 +229,36 @@ export default function SmartNetworkingScreen() {
 
       if (rawContacts) {
         const parsed: any[] = JSON.parse(rawContacts);
-        const normalized: RelationshipContact[] = parsed.map((c) => ({
-          ...c,
-          category: normalizeCategory(c.category),
-        }));
+        const normalized: RelationshipContact[] = [];
+        const seenDayKeys = new Set<string>();
+        let didFixDuplicates = false;
+
+        for (const item of parsed) {
+          const cat = normalizeCategory(item.category);
+          let due = item.nextDueDate || 0;
+          const dayKey = due > 0 ? getDayKey(due) : "";
+
+          if (due <= 0 || seenDayKeys.has(dayKey)) {
+            due = calculateRandomUniqueDueDate(cat, normalized, item.id);
+            didFixDuplicates = true;
+          } else {
+            const d = new Date(due);
+            d.setHours(19, 0, 0, 0);
+            due = d.getTime();
+          }
+
+          seenDayKeys.add(getDayKey(due));
+          normalized.push({
+            ...item,
+            category: cat,
+            nextDueDate: due,
+          });
+        }
+
+        if (didFixDuplicates) {
+          await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
+        }
+
         setContacts(normalized);
 
         const todayEnd = new Date().setHours(23, 59, 59, 999);
@@ -211,7 +271,6 @@ export default function SmartNetworkingScreen() {
 
         setTodayDueContacts(due);
 
-        // Schedule both Offline Local Notifications (naming the contact!) & Online Sync
         await scheduleContactNotificationsOffline(
           normalized as ContactForNotification[],
         );
@@ -229,7 +288,6 @@ export default function SmartNetworkingScreen() {
     void loadContactsAndScheduleNotifications();
   }, [loadContactsAndScheduleNotifications]);
 
-  // Auto-mark contact as spoken when user returns from Phone Call / WhatsApp
   useEffect(() => {
     const subscription = AppState.addEventListener(
       "change",
@@ -255,7 +313,11 @@ export default function SmartNetworkingScreen() {
         return {
           ...c,
           lastCalledAt: Date.now(),
-          nextDueDate: calculateNextDueDate(c.category, contacts, false),
+          nextDueDate: calculateRandomUniqueDueDate(
+            c.category,
+            contacts,
+            c.id,
+          ),
         };
       }
       return c;
@@ -263,7 +325,6 @@ export default function SmartNetworkingScreen() {
 
     await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(updatedList));
 
-    // Update streak
     const todayStr = new Date().toISOString().split("T")[0];
     if (appStats.lastInteractionDate !== todayStr) {
       const nextStreak = appStats.currentStreak + 1;
@@ -288,7 +349,7 @@ export default function SmartNetworkingScreen() {
       await markContactAsSpoken(contact.id);
       Alert.alert(
         "সম্পন্ন হয়েছে ✅",
-        `${contact.name}-এর সাথে যোগাযোগ রেকর্ড করা হয়েছে। পরবর্তী রিমাইন্ডার অটোমেটিক সেট হয়ে গেছে!`,
+        `${contact.name}-এর সাথে যোগাযোগ রেকর্ড করা হয়েছে। পরবর্তী রিমাইন্ডার নতুন একটি র‍্যান্ডম তারিখে সন্ধ্যা ৭টায় সেট হয়ে গেছে!`,
       );
       return;
     }
@@ -336,10 +397,7 @@ export default function SmartNetworkingScreen() {
     }
   };
 
-  const addContactWithCategory = async (
-    category: ContactCategoryType,
-    dueTodayForFirstTime = true,
-  ) => {
+  const addContactWithCategory = async (category: ContactCategoryType) => {
     if (!selectedContactToAdd) return;
     const phone = selectedContactToAdd.phoneNumbers?.[0]?.number || "";
     if (!phone) {
@@ -348,22 +406,23 @@ export default function SmartNetworkingScreen() {
     }
 
     if (contacts.some((c) => c.id === selectedContactToAdd.id)) {
-      Alert.alert("আগে থেকেই আছে", "এই কন্টাক্টটি আপনার লিস্টে ইতিমধ্যেই যুক্ত আছে।");
+      Alert.alert(
+        "আগে থেকেই আছে",
+        "এই কন্টাক্টটি আপনার লিস্টে ইতিমধ্যেই যুক্ত আছে।",
+      );
       setSelectedContactToAdd(null);
       return;
     }
+
+    const randomDueTimestamp = calculateRandomUniqueDueDate(category, contacts);
 
     const newContact: RelationshipContact = {
       id: selectedContactToAdd.id || Date.now().toString(),
       name: selectedContactToAdd.name || "Unknown",
       phoneNumber: phone,
       category,
-      lastCalledAt: 0,
-      nextDueDate: calculateNextDueDate(
-        category,
-        contacts,
-        dueTodayForFirstTime,
-      ),
+      lastCalledAt: Date.now(),
+      nextDueDate: randomDueTimestamp,
       note: customNoteInput.trim() || undefined,
     };
 
@@ -372,13 +431,10 @@ export default function SmartNetworkingScreen() {
     setSelectedContactToAdd(null);
     setCustomNoteInput("");
     setPickerModalVisible(false);
+    setActiveTab(category);
 
     await loadContactsAndScheduleNotifications();
     void syncLocalDataToCloudIfOnline();
-
-    // Immediately fire a confirmation notification naming the added contact!
-    const catCfg = getCategoryConfig(category);
-    await triggerInstantContactNotification(newContact.name, catCfg.label);
   };
 
   const deleteContact = async (id: string, name: string) => {
@@ -416,7 +472,7 @@ export default function SmartNetworkingScreen() {
         ? {
             ...c,
             category: nextCat,
-            nextDueDate: calculateNextDueDate(nextCat, contacts, false),
+            nextDueDate: calculateRandomUniqueDueDate(nextCat, contacts, id),
           }
         : c,
     );
@@ -439,36 +495,39 @@ export default function SmartNetworkingScreen() {
 
   const displayedList = useMemo(() => {
     if (activeTab === "today") return todayDueContacts;
-    return contacts.filter((c) => c.category === activeTab);
+    return contacts
+      .filter((c) => c.category === activeTab)
+      .sort((a, b) => a.nextDueDate - b.nextDueDate);
   }, [activeTab, todayDueContacts, contacts]);
 
   return (
     <SafeAreaView
       className="flex-1 bg-[#0F172A]"
-      edges={["top", "left", "right"]}
+      edges={["top", "bottom", "left", "right"]}
     >
       <StatusBar style="light" />
 
-      {/* HEADER */}
-      <View className="px-6 pt-4 pb-2">
+      {/* HEADER (Overflow-Proof) */}
+      <View className="px-4 pt-3 pb-1">
         <View className="flex-row justify-between items-center mb-1">
-          <View>
+          <View className="flex-1 pr-2">
             <Text
               allowFontScaling={false}
-              className="text-2xl font-black text-white tracking-tight"
+              numberOfLines={1}
+              className="text-xl font-black text-white tracking-tight"
             >
               Contact Reminder CRM
             </Text>
             <Text
               allowFontScaling={false}
-              className="text-slate-400 text-xs font-medium mt-0.5"
+              numberOfLines={1}
+              className="text-slate-400 text-[11px] font-medium mt-0.5"
             >
-              ৩ ক্যাটাগরিতে পরিবার ও বন্ধুদের সাথে সম্পর্ক সতেজ রাখুন
+              সন্ধ্যা ৭:০০টায় র‍্যান্ডম তারিখে নামসহ রিমাইন্ডার
             </Text>
           </View>
 
           <View className="flex-row gap-2">
-            {/* Instant Test Notification Button */}
             <Pressable
               onPress={async () => {
                 const sample = todayDueContacts[0] || contacts[0];
@@ -483,9 +542,9 @@ export default function SmartNetworkingScreen() {
                   );
                 }
               }}
-              className="bg-emerald-600/20 border border-emerald-500/40 h-11 px-3 items-center justify-center rounded-2xl flex-row"
+              className="bg-emerald-600/20 border border-emerald-500/40 h-10 px-2.5 items-center justify-center rounded-xl flex-row"
             >
-              <Ionicons name="notifications" size={18} color="#34D399" />
+              <Ionicons name="notifications" size={16} color="#34D399" />
               <Text
                 allowFontScaling={false}
                 className="text-emerald-300 font-bold text-xs ml-1"
@@ -496,17 +555,17 @@ export default function SmartNetworkingScreen() {
 
             <Pressable
               onPress={() => void openContactPicker()}
-              className="bg-indigo-600 h-11 w-11 items-center justify-center rounded-2xl active:bg-indigo-700"
+              className="bg-indigo-600 h-10 w-10 items-center justify-center rounded-xl active:bg-indigo-700"
             >
-              <Ionicons name="person-add" size={20} color="white" />
+              <Ionicons name="person-add" size={18} color="white" />
             </Pressable>
           </View>
         </View>
 
-        {/* 4 Tabs: Today + 3 Categories */}
-        <View className="flex-row bg-slate-800 p-1 rounded-2xl mt-4 mb-3 border border-slate-700">
+        {/* 4 Tabs: Compact & Overflow-Proof */}
+        <View className="flex-row bg-slate-800 p-1 rounded-2xl mt-3 mb-2 border border-slate-700">
           {[
-            { id: "today", label: `আজকের (${todayDueContacts.length})` },
+            { id: "today", label: `আজ (${todayDueContacts.length})` },
             {
               id: "family",
               label: `পরিবার (${contacts.filter((c) => c.category === "family").length})`,
@@ -523,12 +582,14 @@ export default function SmartNetworkingScreen() {
             <Pressable
               key={tab.id}
               onPress={() => setActiveTab(tab.id as any)}
-              className={`flex-1 py-2.5 rounded-xl items-center justify-center ${
+              className={`flex-1 py-2 px-1 rounded-xl items-center justify-center ${
                 activeTab === tab.id ? "bg-indigo-600" : ""
               }`}
             >
               <Text
                 allowFontScaling={false}
+                numberOfLines={1}
+                adjustsFontSizeToFit
                 className={`font-bold text-[11px] ${
                   activeTab === tab.id ? "text-white" : "text-slate-400"
                 }`}
@@ -541,26 +602,27 @@ export default function SmartNetworkingScreen() {
       </View>
 
       {/* CONTACT CARDS LIST */}
-      <View className="flex-1 px-5 pb-6">
+      <View className="flex-1 px-4">
         {displayedList.length === 0 ? (
-          <View className="flex-1 items-center justify-center pb-16">
-            <View className="w-20 h-20 bg-slate-800 rounded-full items-center justify-center mb-4 border border-slate-700">
-              <Ionicons name="people-outline" size={36} color="#818CF8" />
+          <View className="flex-1 items-center justify-center pb-12">
+            <View className="w-18 h-18 p-5 bg-slate-800 rounded-full items-center justify-center mb-4 border border-slate-700">
+              <Ionicons name="people-outline" size={34} color="#818CF8" />
             </View>
             <Text
               allowFontScaling={false}
-              className="text-slate-200 font-bold text-base mb-1"
+              className="text-slate-200 font-bold text-base mb-1 text-center"
             >
               {activeTab === "today"
-                ? "আজ কথা বলার কেউ বাকি নেই! 🎉"
+                ? "আজ সন্ধ্যা ৭টায় কারো রিমাইন্ডার নেই 🎉"
                 : "এই ক্যাটাগরিতে এখনো কেউ নেই"}
             </Text>
             <Text
               allowFontScaling={false}
-              className="text-slate-500 text-xs text-center px-8"
+              className="text-slate-500 text-xs text-center px-6 leading-5"
             >
-              ওপরের + বাটনে ক্লিক করে ফোনবুক থেকে পরিবার, বন্ধু বা পরিচিতদের
-              ৩টি ক্যাটাগরিতে যুক্ত করুন।
+              {activeTab === "today"
+                ? "পাশের 'পরিবার', 'বন্ধু' বা 'পরিচিত' ট্যাবে ট্যাপ করে দেখুন কার রিমাইন্ডার কোন তারিখে পড়েছে!"
+                : "ওপরের + বাটনে ট্যাপ করে ফোনবুক থেকে কন্টাক্ট যুক্ত করুন।"}
             </Text>
           </View>
         ) : (
@@ -568,38 +630,42 @@ export default function SmartNetworkingScreen() {
             data={displayedList}
             keyExtractor={(item) => item.id}
             showsVerticalScrollIndicator={false}
-            contentContainerStyle={{ paddingBottom: 28 }}
+            contentContainerStyle={{
+              paddingTop: 4,
+              paddingBottom: Math.max(28, insets.bottom + 16),
+            }}
             renderItem={({ item }) => {
               const cfg = getCategoryConfig(item.category);
               return (
-                <View className="bg-slate-800 border border-slate-700 p-4 rounded-3xl mb-3">
+                <View className="bg-slate-800 border border-slate-700 p-3.5 rounded-3xl mb-3">
                   <View className="flex-row items-center justify-between mb-3">
                     <View className="flex-row items-center flex-1 pr-2">
                       <Pressable
                         onPress={() =>
                           void cycleContactCategory(item.id, item.category)
                         }
-                        className={`h-11 w-11 rounded-2xl items-center justify-center mr-3 border ${cfg.bg} ${cfg.border}`}
+                        className={`h-10 w-10 rounded-2xl items-center justify-center mr-3 border ${cfg.bg} ${cfg.border}`}
                       >
                         <Ionicons
                           name={cfg.icon as any}
-                          size={20}
+                          size={18}
                           color={cfg.color}
                         />
                       </Pressable>
                       <View className="flex-1">
                         <Text
                           allowFontScaling={false}
-                          className="text-white font-bold text-base"
+                          className="text-white font-bold text-sm"
                           numberOfLines={1}
                         >
                           {item.name}
                         </Text>
                         <Text
                           allowFontScaling={false}
-                          className="text-slate-400 text-xs mt-0.5"
+                          numberOfLines={1}
+                          className="text-indigo-300 text-[11px] font-semibold mt-0.5"
                         >
-                          {cfg.shortLabel} • Due: {formatDate(item.nextDueDate)}
+                          📅 Next: {formatDate(item.nextDueDate)}
                         </Text>
                       </View>
                     </View>
@@ -610,7 +676,7 @@ export default function SmartNetworkingScreen() {
                     >
                       <Ionicons
                         name="trash-outline"
-                        size={17}
+                        size={16}
                         color="#F43F5E"
                       />
                     </Pressable>
@@ -627,16 +693,17 @@ export default function SmartNetworkingScreen() {
                     </View>
                   ) : null}
 
-                  {/* Quick Connect Actions */}
+                  {/* 3 Equal-Width Compact Action Buttons (Never overflows!) */}
                   <View className="flex-row gap-2">
                     <Pressable
                       onPress={() => void handleInteraction(item, "call")}
-                      className="flex-1 bg-indigo-600 py-2.5 rounded-xl flex-row items-center justify-center active:bg-indigo-700"
+                      className="flex-1 bg-indigo-600 py-2.5 px-1.5 rounded-xl flex-row items-center justify-center active:bg-indigo-700"
                     >
-                      <Ionicons name="call" size={15} color="#FFFFFF" />
+                      <Ionicons name="call" size={14} color="#FFFFFF" />
                       <Text
                         allowFontScaling={false}
-                        className="text-white font-bold text-xs ml-1.5"
+                        numberOfLines={1}
+                        className="text-white font-bold text-[11px] ml-1"
                       >
                         Call
                       </Text>
@@ -644,16 +711,17 @@ export default function SmartNetworkingScreen() {
 
                     <Pressable
                       onPress={() => void handleInteraction(item, "whatsapp")}
-                      className="flex-1 bg-emerald-600/20 border border-emerald-500/40 py-2.5 rounded-xl flex-row items-center justify-center"
+                      className="flex-1 bg-emerald-600/20 border border-emerald-500/40 py-2.5 px-1.5 rounded-xl flex-row items-center justify-center"
                     >
                       <Ionicons
                         name="logo-whatsapp"
-                        size={15}
+                        size={14}
                         color="#34D399"
                       />
                       <Text
                         allowFontScaling={false}
-                        className="text-emerald-300 font-bold text-xs ml-1.5"
+                        numberOfLines={1}
+                        className="text-emerald-300 font-bold text-[11px] ml-1"
                       >
                         WhatsApp
                       </Text>
@@ -661,16 +729,17 @@ export default function SmartNetworkingScreen() {
 
                     <Pressable
                       onPress={() => void handleInteraction(item, "done")}
-                      className="bg-slate-900 border border-slate-700 px-3.5 py-2.5 rounded-xl flex-row items-center justify-center"
+                      className="flex-1 bg-slate-900 border border-slate-700 py-2.5 px-1.5 rounded-xl flex-row items-center justify-center"
                     >
                       <Ionicons
                         name="checkmark-done"
-                        size={16}
+                        size={14}
                         color="#38BDF8"
                       />
                       <Text
                         allowFontScaling={false}
-                        className="text-sky-300 font-bold text-xs ml-1"
+                        numberOfLines={1}
+                        className="text-sky-300 font-bold text-[11px] ml-1"
                       >
                         কথা হয়েছে
                       </Text>
@@ -685,11 +754,15 @@ export default function SmartNetworkingScreen() {
 
       {/* PHONEBOOK CONTACT PICKER MODAL */}
       <Modal visible={pickerModalVisible} animationType="slide">
-        <SafeAreaView className="flex-1 bg-slate-900" edges={["top"]}>
-          <View className="flex-row justify-between items-center px-6 pt-4 pb-3">
+        <SafeAreaView
+          className="flex-1 bg-slate-900"
+          edges={["top", "bottom", "left", "right"]}
+        >
+          <View className="flex-row justify-between items-center px-5 pt-3 pb-3">
             <Text
               allowFontScaling={false}
-              className="text-white text-xl font-bold"
+              numberOfLines={1}
+              className="text-white text-lg font-bold flex-1 pr-2"
             >
               ফোনবুক থেকে কন্টাক্ট বাছাই করুন
             </Text>
@@ -701,9 +774,9 @@ export default function SmartNetworkingScreen() {
             </Pressable>
           </View>
 
-          <View className="px-6 mb-3">
+          <View className="px-5 mb-3">
             <TextInput
-              className="bg-slate-800 text-white px-4 py-3 rounded-2xl border border-slate-700"
+              className="bg-slate-800 text-white px-4 py-2.5 rounded-2xl border border-slate-700 text-sm"
               placeholder="নাম বা নাম্বার দিয়ে খুঁজুন..."
               placeholderTextColor="#64748B"
               value={searchInput}
@@ -723,23 +796,25 @@ export default function SmartNetworkingScreen() {
               data={filteredPhoneContacts}
               keyExtractor={(item, idx) => `${item.id}-${idx}`}
               contentContainerStyle={{
-                paddingHorizontal: 24,
-                paddingBottom: 32,
+                paddingHorizontal: 20,
+                paddingBottom: Math.max(28, insets.bottom + 16),
               }}
               renderItem={({ item }) => (
                 <Pressable
                   onPress={() => setSelectedContactToAdd(item)}
-                  className="bg-slate-800 p-4 rounded-2xl mb-2.5 border border-slate-700 flex-row items-center justify-between"
+                  className="bg-slate-800 p-3.5 rounded-2xl mb-2 border border-slate-700 flex-row items-center justify-between"
                 >
                   <View className="flex-1 pr-3">
                     <Text
                       allowFontScaling={false}
+                      numberOfLines={1}
                       className="text-white font-bold text-sm"
                     >
                       {item.name || "Unknown"}
                     </Text>
                     <Text
                       allowFontScaling={false}
+                      numberOfLines={1}
                       className="text-slate-400 text-xs mt-0.5"
                     >
                       {item.phoneNumbers?.[0]?.number || ""}
@@ -753,87 +828,96 @@ export default function SmartNetworkingScreen() {
         </SafeAreaView>
       </Modal>
 
-      {/* 3-CATEGORY SELECTION MODAL */}
+      {/* 3-CATEGORY SELECTION MODAL (Scrollable + SafeArea Padded so never clipped!) */}
       <Modal transparent visible={!!selectedContactToAdd} animationType="fade">
-        <View className="flex-1 bg-black/75 justify-end">
-          <View className="bg-slate-900 w-full rounded-t-[32px] p-6 border-t border-slate-700">
-            <Text
-              allowFontScaling={false}
-              className="text-white text-xl font-bold text-center"
-            >
-              {selectedContactToAdd?.name}
-            </Text>
-            <Text
-              allowFontScaling={false}
-              className="text-slate-400 text-xs text-center mt-1 mb-4"
-            >
-              কোন ক্যাটাগরিতে রেখে রিমাইন্ডার পেতে চান?
-            </Text>
+        <KeyboardAvoidingView
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          className="flex-1 bg-black/75 justify-end"
+        >
+          <View
+            style={{ paddingBottom: Math.max(20, insets.bottom + 12) }}
+            className="bg-slate-900 w-full rounded-t-[28px] px-5 pt-5 border-t border-slate-700 max-h-[88%]"
+          >
+            <ScrollView showsVerticalScrollIndicator={false}>
+              <Text
+                allowFontScaling={false}
+                numberOfLines={1}
+                className="text-white text-lg font-bold text-center"
+              >
+                {selectedContactToAdd?.name}
+              </Text>
+              <Text
+                allowFontScaling={false}
+                className="text-slate-400 text-xs text-center mt-1 mb-3 leading-4"
+              >
+                ক্যাটাগরি সিলেক্ট করলে অটোমেটিক একটি ফাঁকা র‍্যান্ডম তারিখে
+                সন্ধ্যা ৭টায় রিমাইন্ডার সেট হবে
+              </Text>
 
-            <TextInput
-              placeholder="ছোট নোট (ঐচ্ছিক, যেমন: আঙ্কেলের স্বাস্থ্যের খবর নেব)"
-              placeholderTextColor="#64748B"
-              value={customNoteInput}
-              onChangeText={setCustomNoteInput}
-              className="bg-slate-800 text-white px-4 py-3 rounded-xl border border-slate-700 mb-4 text-xs"
-            />
+              <TextInput
+                placeholder="ছোট নোট (ঐচ্ছিক, যেমন: আঙ্কেলের স্বাস্থ্যের খবর নেব)"
+                placeholderTextColor="#64748B"
+                value={customNoteInput}
+                onChangeText={setCustomNoteInput}
+                className="bg-slate-800 text-white px-3.5 py-2.5 rounded-xl border border-slate-700 mb-3 text-xs"
+              />
 
-            <View className="gap-y-2.5 mb-5">
-              {(["family", "friends", "network"] as ContactCategoryType[]).map(
-                (cat) => {
+              <View className="gap-y-2.5 mb-4">
+                {(
+                  ["family", "friends", "network"] as ContactCategoryType[]
+                ).map((cat) => {
                   const cfg = getCategoryConfig(cat);
                   return (
                     <Pressable
                       key={cat}
-                      onPress={() => void addContactWithCategory(cat, true)}
-                      className="bg-slate-800 p-4 rounded-2xl flex-row items-center border border-slate-700 active:bg-slate-700"
+                      onPress={() => void addContactWithCategory(cat)}
+                      className="bg-slate-800 p-3.5 rounded-2xl flex-row items-center border border-slate-700 active:bg-slate-700"
                     >
                       <View
-                        className={`p-2.5 rounded-xl mr-3.5 ${cfg.bg} border ${cfg.border}`}
+                        className={`p-2 rounded-xl mr-3 ${cfg.bg} border ${cfg.border}`}
                       >
                         <Ionicons
                           name={cfg.icon as any}
-                          size={22}
+                          size={20}
                           color={cfg.color}
                         />
                       </View>
                       <View className="flex-1">
                         <Text
                           allowFontScaling={false}
-                          className="text-white font-bold text-sm"
+                          className="text-white font-bold text-xs"
                         >
                           {cfg.label}
                         </Text>
                         <Text
                           allowFontScaling={false}
-                          className="text-slate-400 text-xs mt-0.5"
+                          className="text-slate-400 text-[11px] mt-0.5 leading-4"
                         >
-                          প্রতি {cfg.intervalDays} দিন পর পর আপনাকে নামসহ
-                          নোটিফিকেশন দেবে
+                          আলাদা র‍্যান্ডম তারিখে সন্ধ্যা ৭:০০টায় নোটিফিকেশন আসবে
                         </Text>
                       </View>
                     </Pressable>
                   );
-                },
-              )}
-            </View>
+                })}
+              </View>
 
-            <Pressable
-              onPress={() => {
-                setSelectedContactToAdd(null);
-                setCustomNoteInput("");
-              }}
-              className="py-3.5 rounded-2xl items-center bg-slate-800"
-            >
-              <Text
-                allowFontScaling={false}
-                className="text-slate-300 font-bold text-sm"
+              <Pressable
+                onPress={() => {
+                  setSelectedContactToAdd(null);
+                  setCustomNoteInput("");
+                }}
+                className="py-3 rounded-2xl items-center bg-slate-800"
               >
-                বাতিল
-              </Text>
-            </Pressable>
+                <Text
+                  allowFontScaling={false}
+                  className="text-slate-300 font-bold text-xs"
+                >
+                  বাতিল
+                </Text>
+              </Pressable>
+            </ScrollView>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
     </SafeAreaView>
   );

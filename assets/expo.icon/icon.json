@@ -1,0 +1,43 @@
+{
+  "fill": {
+    "color": {
+      "color-space": "srgb",
+      "components": {
+        "red": 0.059,
+        "green": 0.09,
+        "blue": 0.165,
+        "alpha": 1.0
+      }
+    }
+  },
+  "groups": [
+    {
+      "layers": [
+        {
+          "image-name": "./Assets/Jnulogo.png",
+          "name": "Jnuits",
+          "position": {
+            "scale": 1,
+            "translation-in-points": [0.0, -16.0]
+          }
+        },
+        {
+          "image-name": "grid.png",
+          "name": "grid"
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.5
+      },
+      "translucency": {
+        "enabled": true,
+        "value": 0.5
+      }
+    }
+  ],
+  "supported-platforms": {
+    "circles": ["watchOS"],
+    "squares": "shared"
+  }
+}

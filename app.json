@@ -1,0 +1,80 @@
+{
+  "expo": {
+    "name": "Jnuits",
+    "slug": "Jnuits",
+    "version": "1.6.0",
+    "orientation": "portrait",
+    "icon": "./assets/expo.icon/Assets/Jnulogo.png",
+    "scheme": "jnuits",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "icon": "./assets/expo.icon",
+      "bundleIdentifier": "com.juwel522.myapp"
+    },
+    "splash": {
+      "image": "./assets/expo.icon/Assets/Jnulogo.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0F172A"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#0F172A",
+        "foregroundImage": "./assets/expo.icon/Assets/Jnulogo.png"
+      },
+      "predictiveBackGestureEnabled": false,
+      "package": "com.juwel522.myapp",
+      "permissions": [
+        "com.android.alarm.permission.SET_ALARM",
+        "android.permission.SCHEDULE_EXACT_ALARM",
+        "android.permission.USE_EXACT_ALARM",
+        "android.permission.WAKE_LOCK",
+        "android.permission.DISABLE_KEYGUARD",
+        "android.permission.SYSTEM_ALERT_WINDOW",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.RECEIVE_BOOT_COMPLETED",
+        "android.permission.READ_CONTACTS",
+        "android.permission.VIBRATE"
+      ]
+    },
+    "web": {
+      "output": "static",
+      "favicon": "./assets/images/favicon.png"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#0F172A",
+          "image": "./assets/expo.icon/Assets/Jnulogo.png",
+          "imageWidth": 200
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/expo.icon/Assets/Jnulogo.png",
+          "color": "#4F46E5",
+          "defaultChannel": "contact-reminders-v2"
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "enableSeparateBuildPerCPUArchitecture": true
+          }
+        }
+      ],
+      "@react-native-google-signin/google-signin",
+      "./plugins/withAlarmModule.js",
+      "./plugins/withFocusLock.js",
+      "./withSplitApks.js",
+      "@react-native-community/datetimepicker"
+    ],
+    "experiments": {
+      "typedRoutes": true,
+      "reactCompiler": true
+    }
+  }
+}

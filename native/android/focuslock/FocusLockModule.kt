@@ -19,16 +19,27 @@ import android.os.SystemClock
 import android.provider.Settings
 import android.text.TextUtils
 import android.util.Base64
+import androidx.core.content.FileProvider
 import com.facebook.react.bridge.*
+import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.util.HashSet
 
 class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaModule(reactContext) {
 
     companion object {
-        private const val POMODORO_FOCUS_MILLIS = 25 * 60 * 1000L
-        private const val POMODORO_BREAK_MILLIS = 5 * 60 * 1000L
-        private const val POMODORO_CYCLE_MILLIS = POMODORO_FOCUS_MILLIS + POMODORO_BREAK_MILLIS
+        private const val SESSION_FOCUS_MILLIS = 25 * 60 * 1000L
+        private const val SESSION_BREAK_MILLIS = 5 * 60 * 1000L
+        private const val SESSION_CYCLE_MILLIS = SESSION_FOCUS_MILLIS + SESSION_BREAK_MILLIS
+
+        private const val SCHEDULE_FOCUS_MILLIS = 50 * 60 * 1000L
+        private const val SCHEDULE_BREAK_MILLIS = 10 * 60 * 1000L
+        private const val SCHEDULE_CYCLE_MILLIS = SCHEDULE_FOCUS_MILLIS + SCHEDULE_BREAK_MILLIS
+
+        // Max Duration Safety Caps: Session = 6h (360m), Schedule = 10h (600m)
+        private const val MAX_SESSION_MINUTES = 360
+        private const val MAX_SCHEDULE_MINUTES = 600
     }
 
     override fun getName(): String {
@@ -44,7 +55,6 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
     }
 
     private fun saveAllowedDomainsToPrefs(prefs: android.content.SharedPreferences, domainList: List<String>) {
-        // Max 5 sites & strictly filter out YouTube domains
         val cleanList = domainList
             .map { it.trim().lowercase().removePrefix("https://").removePrefix("http://").removePrefix("www.").trimEnd('/') }
             .filter { it.isNotEmpty() && !it.contains("youtube.") && !it.contains("youtu.be") }
@@ -286,7 +296,55 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
         }
     }
 
-    // 🌟 Opens a specific whitelisted website directly inside Google Chrome so old blocked tabs never kick the user out!
+    @ReactMethod
+    fun setScheduleBreakEnabled(enabled: Boolean, promise: Promise) {
+        try {
+            val prefs = reactApplicationContext.getSharedPreferences("FocusModePrefs", Context.MODE_PRIVATE)
+            prefs.edit().putBoolean("SCHEDULE_BREAK_ENABLED", enabled).commit()
+            promise.resolve(true)
+        } catch (e: Exception) {
+            promise.reject("ERROR", e.message)
+        }
+    }
+
+    // 🌟 Opens a selected .pdf file directly in News Plus PDF Viewer / Google Drive PDF Viewer!
+    @ReactMethod
+    fun openPdfUri(uriString: String, promise: Promise) {
+        try {
+            val prefs = reactApplicationContext.getSharedPreferences("FocusModePrefs", Context.MODE_PRIVATE)
+            prefs.edit()
+                .putLong("PDF_OPEN_GRACE_UNTIL", System.currentTimeMillis() + 15000L)
+                .commit()
+
+            val parsedUri = if (uriString.startsWith("file://")) {
+                val file = File(Uri.parse(uriString).path ?: "")
+                FileProvider.getUriForFile(
+                    reactApplicationContext,
+                    "${reactApplicationContext.packageName}.provider",
+                    file
+                )
+            } else {
+                Uri.parse(uriString)
+            }
+
+            val viewIntent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(parsedUri, "application/pdf")
+                addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            }
+
+            val chooser = Intent.createChooser(viewIntent, "Read Study PDF").apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            reactApplicationContext.startActivity(chooser)
+            promise.resolve(true)
+        } catch (e: Exception) {
+            promise.reject("OPEN_PDF_ERROR", e.message)
+        }
+    }
+
     @ReactMethod
     fun openUrlInChrome(domainOrUrl: String, promise: Promise) {
         try {
@@ -343,7 +401,6 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
                 .putStringSet("ALLOWED_APPS", HashSet(updatedSet))
                 .commit()
 
-            // 🌟 If opening YouTube, immediately start the YouTube timer from second 1!
             if (cleanPkg == "com.google.android.youtube") {
                 reactApplicationContext.sendBroadcast(
                     Intent(FocusBlockerService.ACTION_START_YT_TRACKER)
@@ -351,7 +408,6 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
                 )
             }
 
-            // 🌟 If opening Chrome via its app icon, open the first allowed website so an old blocked tab doesn't kick user out!
             if (cleanPkg == "com.android.chrome") {
                 val domainsCsv = prefs.getString("ALLOWED_DOMAINS_CSV", "") ?: ""
                 val firstDomain = domainsCsv.split(",").map { it.trim() }.firstOrNull { it.isNotEmpty() }
@@ -384,6 +440,9 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
         promise: Promise
     ) {
         try {
+            // 🌟 Enforce Max 6 Hours (360 minutes) Safety Cap for Session Lock!
+            val safeDurationMinutes = durationMinutes.coerceIn(1, MAX_SESSION_MINUTES)
+
             val pkgSet = HashSet<String>()
             val limit = minOf(allowedPackages.size(), 6)
             for (i in 0 until limit) {
@@ -394,7 +453,7 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
             val prefs = reactApplicationContext.getSharedPreferences("FocusModePrefs", Context.MODE_PRIVATE)
             val now = System.currentTimeMillis()
             val nowRealtime = SystemClock.elapsedRealtime()
-            val sessionEndTime = now + (durationMinutes * 60 * 1000L)
+            val sessionEndTime = now + (safeDurationMinutes * 60 * 1000L)
 
             saveAllowedAppsToPrefs(prefs, pkgSet)
 
@@ -406,7 +465,7 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
                 putLong("SESSION_START_TIME", now)
                 putLong("SESSION_START_REALTIME", nowRealtime)
                 putLong("SESSION_END_TIME", sessionEndTime)
-                putLong("SESSION_PLANNED_DURATION", durationMinutes * 60 * 1000L)
+                putLong("SESSION_PLANNED_DURATION", safeDurationMinutes * 60 * 1000L)
             }.commit()
 
             val alarmManager = reactApplicationContext.getSystemService(Context.ALARM_SERVICE) as AlarmManager
@@ -530,20 +589,26 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
             val endTimeMillis = prefs.getLong("SESSION_END_TIME", 0L)
             val lockMode = prefs.getString("LOCK_MODE", "SESSION") ?: "SESSION"
             val pomodoroEnabled = prefs.getBoolean("POMODORO_ENABLED", true)
+            val scheduleBreakEnabled = prefs.getBoolean("SCHEDULE_BREAK_ENABLED", true)
 
             var isBreakActive = false
             var cycleRemainingMillis = 0L
 
             if (active && endTimeMillis > now) {
-                if (lockMode == "SESSION" && pomodoroEnabled && startTimeMillis > 0L && now > startTimeMillis) {
+                val useCycle = (lockMode == "SESSION" && pomodoroEnabled) ||
+                    (lockMode == "SCHEDULE" && scheduleBreakEnabled)
+
+                if (useCycle && startTimeMillis > 0L && now > startTimeMillis) {
+                    val focusMillis = if (lockMode == "SCHEDULE") SCHEDULE_FOCUS_MILLIS else SESSION_FOCUS_MILLIS
+                    val cycleMillis = if (lockMode == "SCHEDULE") SCHEDULE_CYCLE_MILLIS else SESSION_CYCLE_MILLIS
                     val elapsed = now - startTimeMillis
-                    val cyclePos = elapsed % POMODORO_CYCLE_MILLIS
-                    if (cyclePos >= POMODORO_FOCUS_MILLIS) {
+                    val cyclePos = elapsed % cycleMillis
+                    if (cyclePos >= focusMillis) {
                         isBreakActive = true
-                        cycleRemainingMillis = POMODORO_CYCLE_MILLIS - cyclePos
+                        cycleRemainingMillis = cycleMillis - cyclePos
                     } else {
                         isBreakActive = false
-                        cycleRemainingMillis = POMODORO_FOCUS_MILLIS - cyclePos
+                        cycleRemainingMillis = focusMillis - cyclePos
                     }
                 } else {
                     cycleRemainingMillis = endTimeMillis - now
@@ -561,6 +626,7 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
             val ytUsedMinutes = (ytUsedMillis / 60000L).toInt()
             val ytLimitMinutes = prefs.getInt("YT_LIMIT_MINUTES", 90)
             val lastCompletedDate = prefs.getString("LAST_COMPLETED_DATE", "") ?: ""
+            val completedHistoryJson = prefs.getString("COMPLETED_HISTORY_JSON", "{}") ?: "{}"
 
             val map = WritableNativeMap().apply {
                 putBoolean("active", active && endTimeMillis > now)
@@ -568,6 +634,7 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
                 putDouble("endTimeMillis", endTimeMillis.toDouble())
                 putString("lockMode", lockMode)
                 putBoolean("pomodoroEnabled", pomodoroEnabled)
+                putBoolean("scheduleBreakEnabled", scheduleBreakEnabled)
                 putBoolean("isBreakActive", isBreakActive)
                 putDouble("cycleRemainingMillis", cycleRemainingMillis.toDouble())
                 putInt("emergencyPasses", emergencyPasses)
@@ -579,6 +646,7 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
                 putInt("ytUsedMinutes", ytUsedMinutes)
                 putInt("ytLimitMinutes", ytLimitMinutes)
                 putString("lastCompletedDate", lastCompletedDate)
+                putString("completedHistoryJson", completedHistoryJson)
             }
             promise.resolve(map)
         } catch (e: Exception) {
@@ -626,7 +694,6 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
         }
     }
 
-    // 🌟 Anti-Cheat Cloud Merge: Never overwrites newer local pass/streak with stale cloud values!
     @ReactMethod
     fun syncPassAndStreakFromCloud(
         cloudPasses: Int,
@@ -634,6 +701,7 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
         cloudLastDate: String,
         cloudEarned: Int,
         cloudUsed: Int,
+        cloudHistoryJson: String,
         promise: Promise
     ) {
         try {
@@ -642,14 +710,13 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
             val localUsed = prefs.getInt("TOTAL_PASSES_USED", 0)
             val localStreak = prefs.getInt("STREAK_DAYS", 0)
             val localLastDate = prefs.getString("LAST_COMPLETED_DATE", "") ?: ""
+            val localHistoryStr = prefs.getString("COMPLETED_HISTORY_JSON", "{}") ?: "{}"
 
-            // Merge Earned & Used monotonically (highest wins so earned passes are never lost and spent passes never come back!)
             val effectiveCloudEarned = if (cloudEarned > 0) cloudEarned else cloudPasses + cloudUsed
             val mergedEarned = maxOf(localEarned, effectiveCloudEarned)
             val mergedUsed = maxOf(localUsed, cloudUsed)
             val mergedPasses = (mergedEarned - mergedUsed).coerceIn(0, 5)
 
-            // Keep whichever streak belongs to the more recent date
             val mergedLastDate: String
             val mergedStreak: Int
             if (localLastDate >= cloudLastDate && localLastDate.isNotEmpty()) {
@@ -660,12 +727,36 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
                 mergedStreak = cloudStreakDays
             }
 
+            // Merge 60-day GitHub streak history JSON maps (max minutes per date)
+            val mergedHistory = JSONObject()
+            try {
+                val localObj = JSONObject(localHistoryStr)
+                val keys = localObj.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    mergedHistory.put(k, localObj.optInt(k, 30))
+                }
+            } catch (_: Exception) {}
+            try {
+                if (cloudHistoryJson.isNotEmpty()) {
+                    val cloudObj = JSONObject(cloudHistoryJson)
+                    val keys = cloudObj.keys()
+                    while (keys.hasNext()) {
+                        val k = keys.next()
+                        val cVal = cloudObj.optInt(k, 30)
+                        val lVal = mergedHistory.optInt(k, 0)
+                        mergedHistory.put(k, maxOf(lVal, cVal))
+                    }
+                }
+            } catch (_: Exception) {}
+
             prefs.edit()
                 .putInt("TOTAL_PASSES_EARNED", mergedEarned)
                 .putInt("TOTAL_PASSES_USED", mergedUsed)
                 .putInt("EMERGENCY_PASSES", mergedPasses)
                 .putInt("STREAK_DAYS", mergedStreak.coerceIn(0, 2))
                 .putString("LAST_COMPLETED_DATE", mergedLastDate)
+                .putString("COMPLETED_HISTORY_JSON", mergedHistory.toString())
                 .commit()
 
             promise.resolve(true)

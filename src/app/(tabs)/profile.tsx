@@ -1,11 +1,12 @@
-import { Ionicons } from "@expo/vector-icons";
+import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { GoogleSignin } from "@react-native-google-signin/google-signin";
 import { useFocusEffect, useIsFocused, useRouter } from "expo-router";
 import { StatusBar } from "expo-status-bar";
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useMemo, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   Image,
   NativeModules,
   Platform,
@@ -19,11 +20,18 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
   CACHED_USER_PROFILE_KEY,
   CachedUserProfile,
-   supabase,
+  supabase,
   syncLocalDataToCloudIfOnline,
 } from "../../lib/supabase";
 
 const { FocusLock } = NativeModules;
+
+interface DayCell {
+  dateStr: string;
+  label: string;
+  minutes: number;
+  isToday: boolean;
+}
 
 export default function Profile() {
   const router = useRouter();
@@ -31,6 +39,7 @@ export default function Profile() {
   const insets = useSafeAreaInsets();
   const [profile, setProfile] = useState<CachedUserProfile | null>(null);
   const [totalCompleted, setTotalCompleted] = useState(0);
+  const [historyMap, setHistoryMap] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
 
@@ -45,6 +54,8 @@ export default function Profile() {
       let passes = 0;
       let streak = 0;
       let completed = 0;
+      let parsedHistory: Record<string, number> = {};
+
       if (Platform.OS === "android" && FocusLock?.getFocusSessionState) {
         try {
           const s = await FocusLock.getFocusSessionState();
@@ -52,6 +63,10 @@ export default function Profile() {
           streak = s.streakDays ?? 0;
           completed = s.totalCompleted ?? 0;
           setTotalCompleted(completed);
+          if (s.completedHistoryJson) {
+            parsedHistory = JSON.parse(s.completedHistoryJson);
+            setHistoryMap(parsedHistory);
+          }
         } catch {}
       }
 
@@ -60,6 +75,17 @@ export default function Profile() {
       } = await supabase.auth.getUser();
 
       if (user) {
+        const cloudHistory =
+          user.user_metadata?.jnuits_backup_v2?.completedHistory || {};
+        const mergedHistory: Record<string, number> = { ...cloudHistory };
+        Object.keys(parsedHistory).forEach((k) => {
+          mergedHistory[k] = Math.max(
+            mergedHistory[k] || 0,
+            parsedHistory[k] || 0,
+          );
+        });
+        setHistoryMap(mergedHistory);
+
         const freshProfile: CachedUserProfile = {
           id: user.id,
           name:
@@ -98,6 +124,75 @@ export default function Profile() {
     }, [loadUserProfileOfflineFirst]),
   );
 
+  // Build 60-Day (9 Weeks x 7 Days = 63 cells ending Today) GitHub-style Contribution Grid
+  const heatmapData = useMemo(() => {
+    const totalDays = 63; // 9 columns x 7 rows
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const cells: DayCell[] = [];
+    let activeDaysCount = 0;
+    let totalFocusMins60d = 0;
+
+    for (let i = totalDays - 1; i >= 0; i--) {
+      const d = new Date(today);
+      d.setDate(today.getDate() - i);
+      const yyyy = d.getFullYear();
+      const mm = String(d.getMonth() + 1).padStart(2, "0");
+      const dd = String(d.getDate()).padStart(2, "0");
+      const dateStr = `${yyyy}-${mm}-${dd}`;
+      const mins = historyMap[dateStr] || 0;
+
+      if (i < 60 && mins >= 30) {
+        activeDaysCount++;
+      }
+      if (i < 60) {
+        totalFocusMins60d += mins;
+      }
+
+      const months = [
+        "Jan",
+        "Feb",
+        "Mar",
+        "Apr",
+        "May",
+        "Jun",
+        "Jul",
+        "Aug",
+        "Sep",
+        "Oct",
+        "Nov",
+        "Dec",
+      ];
+      cells.push({
+        dateStr,
+        label: `${months[d.getMonth()]} ${d.getDate()}`,
+        minutes: mins,
+        isToday: i === 0,
+      });
+    }
+
+    // Group into 9 week columns of 7 days each
+    const weeks: DayCell[][] = [];
+    for (let w = 0; w < 9; w++) {
+      weeks.push(cells.slice(w * 7, w * 7 + 7));
+    }
+
+    return {
+      weeks,
+      activeDaysCount,
+      totalFocusHours: (totalFocusMins60d / 60).toFixed(1),
+    };
+  }, [historyMap]);
+
+  const getGitHubGreenClass = (mins: number) => {
+    if (mins <= 0) return "bg-slate-800/90 border-slate-700/60";
+    if (mins < 45) return "bg-emerald-900 border-emerald-700/70";
+    if (mins < 90) return "bg-emerald-700 border-emerald-500/80";
+    if (mins < 180) return "bg-emerald-500 border-emerald-400";
+    return "bg-emerald-400 border-emerald-200";
+  };
+
   const handleManualSync = async () => {
     setSyncing(true);
     await syncLocalDataToCloudIfOnline();
@@ -120,7 +215,7 @@ export default function Profile() {
 
   if (loading) {
     return (
-      <View className="flex-1 items-center justify-center bg-[#0F172A]">
+      <View className="flex-1 items-center justify-center bg-[#0B1120]">
         <ActivityIndicator size="large" color="#818CF8" />
       </View>
     );
@@ -134,7 +229,7 @@ export default function Profile() {
   const streak = profile?.streakDays ?? 0;
 
   return (
-    <View className="flex-1 bg-[#0F172A]">
+    <View className="flex-1 bg-[#0B1120]">
       {isFocused && <StatusBar style="light" />}
 
       <ScrollView
@@ -144,19 +239,20 @@ export default function Profile() {
           paddingBottom: Math.max(32, insets.bottom + 20),
         }}
       >
-        {/* 🌟 Curved Gradient Hero Header */}
+        {/* Curved Gradient Hero Header */}
         <View
           style={{ paddingTop: Math.max(20, insets.top + 12) }}
-          className="bg-[#1E1B4B] pb-8 px-6 rounded-b-[36px] border-b border-indigo-500/30 items-center"
+          className="bg-[#131C31] pb-7 px-6 rounded-b-[36px] border-b border-indigo-500/25 items-center"
         >
-          <View className="p-1 rounded-full bg-indigo-500/30 border-2 border-indigo-400">
+          <View className="p-1 rounded-full bg-indigo-500/25 border-2 border-indigo-400">
             {avatarUrl ? (
               <Image
                 source={{ uri: avatarUrl }}
-                className="h-24 w-24 rounded-full"
+                className="h-22 w-22 rounded-full"
+                style={{ width: 84, height: 84, borderRadius: 42 }}
               />
             ) : (
-              <View className="h-24 w-24 items-center justify-center rounded-full bg-indigo-600">
+              <View className="h-20 w-20 items-center justify-center rounded-full bg-indigo-600">
                 <Text className="text-3xl font-black text-white">
                   {initial}
                 </Text>
@@ -167,7 +263,7 @@ export default function Profile() {
           <Text
             allowFontScaling={false}
             numberOfLines={1}
-            className="mt-3.5 text-2xl font-black text-white text-center"
+            className="mt-3 text-2xl font-black text-white text-center"
           >
             {fullName}
           </Text>
@@ -180,22 +276,30 @@ export default function Profile() {
           </Text>
 
           <View className="mt-3 bg-emerald-500/15 border border-emerald-500/40 px-3.5 py-1 rounded-full flex-row items-center">
-            <Ionicons name="checkmark-circle" size={14} color="#34D399" />
+            <MaterialCommunityIcons
+              name="check-decagram"
+              size={15}
+              color="#34D399"
+            />
             <Text
               allowFontScaling={false}
               className="text-emerald-300 font-bold text-[11px] ml-1.5"
             >
-              Verified Google Profile • {totalCompleted} Sessions Done
+              Verified Profile • {totalCompleted} Locks Completed
             </Text>
           </View>
         </View>
 
-        {/* 🌟 2-Column Gamified Pass & Streak Cards */}
-        <View className="flex-row gap-3 px-4 mt-5">
-          <View className="flex-1 bg-slate-800/90 border border-slate-700 p-4 rounded-3xl">
+        {/* 2-Column Gamified Pass & Streak Cards */}
+        <View className="flex-row gap-3 px-4 mt-4">
+          <View className="flex-1 bg-[#131C31] border border-slate-800 p-4 rounded-3xl">
             <View className="flex-row items-center justify-between mb-2">
-              <View className="w-9 h-9 rounded-xl bg-amber-500/20 items-center justify-center">
-                <Ionicons name="ticket" size={18} color="#FBBF24" />
+              <View className="w-9 h-9 rounded-xl bg-amber-500/20 border border-amber-500/30 items-center justify-center">
+                <MaterialCommunityIcons
+                  name="ticket-confirmation"
+                  size={18}
+                  color="#FBBF24"
+                />
               </View>
               <Text
                 allowFontScaling={false}
@@ -215,17 +319,17 @@ export default function Profile() {
                 <View
                   key={i}
                   className={`flex-1 h-2 rounded-full ${
-                    passes >= i ? "bg-amber-400" : "bg-slate-700"
+                    passes >= i ? "bg-amber-400" : "bg-slate-800"
                   }`}
                 />
               ))}
             </View>
           </View>
 
-          <View className="flex-1 bg-slate-800/90 border border-slate-700 p-4 rounded-3xl">
+          <View className="flex-1 bg-[#131C31] border border-slate-800 p-4 rounded-3xl">
             <View className="flex-row items-center justify-between mb-2">
-              <View className="w-9 h-9 rounded-xl bg-emerald-500/20 items-center justify-center">
-                <Ionicons name="flame" size={18} color="#34D399" />
+              <View className="w-9 h-9 rounded-xl bg-emerald-500/20 border border-emerald-500/30 items-center justify-center">
+                <MaterialCommunityIcons name="fire" size={19} color="#34D399" />
               </View>
               <Text
                 allowFontScaling={false}
@@ -245,7 +349,7 @@ export default function Profile() {
                 <View
                   key={i}
                   className={`flex-1 h-2 rounded-full ${
-                    streak >= i ? "bg-emerald-400" : "bg-slate-700"
+                    streak >= i ? "bg-emerald-400" : "bg-slate-800"
                   }`}
                 />
               ))}
@@ -253,18 +357,132 @@ export default function Profile() {
           </View>
         </View>
 
-        {/* 🌟 Cloud Backup & Sync Card */}
-        <View className="mx-4 mt-4 rounded-3xl bg-slate-800/90 border border-slate-700 p-4 flex-row items-center justify-between">
+        {/* 🌟 NEW: LAST 2 MONTHS (60 DAYS) GITHUB-STYLE GREEN STREAK HEATMAP */}
+        <View className="mx-4 mt-4 rounded-3xl bg-[#131C31] border border-slate-800 p-4">
+          <View className="flex-row items-center justify-between mb-3">
+            <View className="flex-row items-center flex-1 pr-2">
+              <View className="w-9 h-9 rounded-xl bg-emerald-500/15 border border-emerald-500/30 items-center justify-center mr-2.5">
+                <MaterialCommunityIcons
+                  name="calendar-multiselect"
+                  size={18}
+                  color="#34D399"
+                />
+              </View>
+              <View className="flex-1">
+                <Text
+                  allowFontScaling={false}
+                  className="text-white font-bold text-sm"
+                >
+                  Last 60 Days Focus Streak
+                </Text>
+                <Text
+                  allowFontScaling={false}
+                  className="text-slate-400 text-[11px]"
+                >
+                  {heatmapData.activeDaysCount} Active Days •{" "}
+                  {heatmapData.totalFocusHours}h Total Focus
+                </Text>
+              </View>
+            </View>
+
+            <View className="bg-emerald-500/15 border border-emerald-500/30 px-2.5 py-1 rounded-full">
+              <Text
+                allowFontScaling={false}
+                className="text-emerald-300 font-black text-[10px]"
+              >
+                2 Months
+              </Text>
+            </View>
+          </View>
+
+          {/* 9 Weeks x 7 Days Matrix */}
+          <View className="bg-[#0B1120] p-3 rounded-2xl border border-slate-800/80">
+            <View className="flex-row justify-between items-center">
+              {/* Day labels column */}
+              <View className="justify-between mr-1.5 py-0.5" style={{ height: 118 }}>
+                {["S", "M", "T", "W", "T", "F", "S"].map((d, idx) => (
+                  <Text
+                    key={idx}
+                    allowFontScaling={false}
+                    className="text-[9px] font-bold text-slate-500 leading-3"
+                  >
+                    {d}
+                  </Text>
+                ))}
+              </View>
+
+              {/* 9 Week Columns */}
+              <View className="flex-1 flex-row justify-between">
+                {heatmapData.weeks.map((week, wIdx) => (
+                  <View key={wIdx} className="gap-y-1.5">
+                    {week.map((cell) => (
+                      <Pressable
+                        key={cell.dateStr}
+                        onPress={() =>
+                          Alert.alert(
+                            `${cell.label} (${cell.dateStr})`,
+                            cell.minutes > 0
+                              ? `এই দিনে আপনি মোট ${cell.minutes} মিনিট কড়া ফোকাস লক পূর্ণ করেছেন।`
+                              : "এই দিনে কোনো ৩০+ মিনিটের ফোকাস লক রেকর্ড করা হয়নি।",
+                          )
+                        }
+                        className={`w-6 h-3.5 rounded-[4px] border ${getGitHubGreenClass(
+                          cell.minutes,
+                        )} ${cell.isToday ? "border-white" : ""}`}
+                      />
+                    ))}
+                  </View>
+                ))}
+              </View>
+            </View>
+
+            {/* GitHub Legend Row */}
+            <View className="flex-row items-center justify-between mt-3 pt-2 border-t border-slate-800/80">
+              <Text
+                allowFontScaling={false}
+                className="text-[10px] text-slate-400"
+              >
+                ট্যাপ করে প্রতিদিনের রেকর্ড দেখুন
+              </Text>
+              <View className="flex-row items-center gap-1">
+                <Text
+                  allowFontScaling={false}
+                  className="text-[10px] text-slate-400 mr-1"
+                >
+                  Less
+                </Text>
+                <View className="w-3 h-3 rounded-[3px] bg-slate-800 border border-slate-700" />
+                <View className="w-3 h-3 rounded-[3px] bg-emerald-900 border border-emerald-700" />
+                <View className="w-3 h-3 rounded-[3px] bg-emerald-700 border border-emerald-500" />
+                <View className="w-3 h-3 rounded-[3px] bg-emerald-500 border border-emerald-400" />
+                <View className="w-3 h-3 rounded-[3px] bg-emerald-400 border border-emerald-200" />
+                <Text
+                  allowFontScaling={false}
+                  className="text-[10px] text-slate-400 ml-1"
+                >
+                  More
+                </Text>
+              </View>
+            </View>
+          </View>
+        </View>
+
+        {/* Cloud Backup & Sync Card */}
+        <View className="mx-4 mt-4 rounded-3xl bg-[#131C31] border border-slate-800 p-4 flex-row items-center justify-between">
           <View className="flex-row items-center flex-1 pr-3">
-            <View className="w-10 h-10 rounded-2xl bg-indigo-500/20 items-center justify-center mr-3">
-              <Ionicons name="cloud-done" size={20} color="#818CF8" />
+            <View className="w-10 h-10 rounded-2xl bg-indigo-500/20 border border-indigo-500/30 items-center justify-center mr-3">
+              <MaterialCommunityIcons
+                name="cloud-check-outline"
+                size={20}
+                color="#818CF8"
+              />
             </View>
             <View className="flex-1">
               <Text
                 allowFontScaling={false}
                 className="text-sm font-bold text-white"
               >
-                Cloud Profile Backup
+                Cloud Profile & Streak Backup
               </Text>
               <Text
                 allowFontScaling={false}
@@ -279,7 +497,7 @@ export default function Profile() {
             disabled={syncing}
             className="bg-indigo-600 px-3.5 py-2.5 rounded-xl flex-row items-center active:bg-indigo-700"
           >
-            <Ionicons name="sync" size={14} color="#FFFFFF" />
+            <MaterialCommunityIcons name="sync" size={15} color="#FFFFFF" />
             <Text
               allowFontScaling={false}
               className="text-white font-bold text-xs ml-1.5"
@@ -289,18 +507,18 @@ export default function Profile() {
           </Pressable>
         </View>
 
-        {/* 🌟 Modern Navigation Cards */}
-        <View className="mx-4 mt-4 rounded-3xl bg-slate-800/90 border border-slate-700 overflow-hidden">
+        {/* Modern Navigation Cards */}
+        <View className="mx-4 mt-4 rounded-3xl bg-[#131C31] border border-slate-800 overflow-hidden">
           <MenuItem
-            icon="shield-checkmark"
+            icon="shield-lock"
             color="#F43F5E"
             bg="bg-rose-500/15"
-            title="Strict Focus Lock & Passes"
-            subtitle="25m/5m Session, Schedule & Website Rules"
+            title="Strict Focus Lock & PDF Reader"
+            subtitle="25m/5m Session, 50m/10m Schedule & Study PDF"
             onPress={() => router.push("/features/StrictFocusScreen")}
           />
           <MenuItem
-            icon="people"
+            icon="account-heart"
             color="#34D399"
             bg="bg-emerald-500/15"
             title="3-Category Contact CRM"
@@ -308,7 +526,7 @@ export default function Profile() {
             onPress={() => router.push("/features/SmartNetworking")}
           />
           <MenuItem
-            icon="alarm"
+            icon="alarm-light"
             color="#A78BFA"
             bg="bg-violet-500/15"
             title="90-Min Sleep Cycle Hard Alarm"
@@ -316,17 +534,17 @@ export default function Profile() {
             onPress={() => router.push("/features/alarm")}
           />
           <MenuItem
-            icon="notifications"
+            icon="bell-ring"
             color="#38BDF8"
             bg="bg-sky-500/15"
             title="Notification Center"
-            subtitle="সকল রিমাইন্ডার ও ফোকাস অ্যালার্ট"
+            subtitle="সকল রিমাইন্ডার ও ফোকাস অ্যালার্ট ম্যানেজ করুন"
             onPress={() => router.push("/(tabs)/notice")}
             isLast
           />
         </View>
 
-        {/* 🌟 Sleek Logout Button */}
+        {/* Sleek Logout Button */}
         <Pressable
           onPress={() => void handleLogout()}
           className="mx-4 mt-5 flex-row items-center justify-center rounded-2xl bg-rose-500/15 border border-rose-500/40 p-4 active:bg-rose-500/25"
@@ -353,7 +571,7 @@ function MenuItem({
   onPress,
   isLast,
 }: {
-  icon: keyof typeof Ionicons.glyphMap;
+  icon: keyof typeof MaterialCommunityIcons.glyphMap;
   color: string;
   bg: string;
   title: string;
@@ -366,14 +584,14 @@ function MenuItem({
       onPress={onPress}
       activeOpacity={0.7}
       className={`flex-row items-center justify-between p-4 ${
-        isLast ? "" : "border-b border-slate-700/60"
+        isLast ? "" : "border-b border-slate-800"
       }`}
     >
       <View className="flex-row items-center flex-1 pr-3">
         <View
           className={`w-10 h-10 rounded-2xl ${bg} items-center justify-center mr-3.5`}
         >
-          <Ionicons name={icon} size={20} color={color} />
+          <MaterialCommunityIcons name={icon} size={20} color={color} />
         </View>
         <View className="flex-1">
           <Text

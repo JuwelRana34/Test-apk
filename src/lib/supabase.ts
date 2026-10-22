@@ -28,6 +28,7 @@ export const CONTACT_REMINDER_CHANNEL = "contact-reminders-v2";
 export const FOCUS_LOCK_CHANNEL = "focus-lock-alerts";
 export const IN_APP_NOTICES_KEY = "@jnuits_in_app_notices";
 export const EXPO_PUSH_TOKEN_KEY = "@jnuits_expo_push_token";
+const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
 export interface AppNoticeItem {
   id: string;
@@ -192,8 +193,8 @@ export async function scheduleContactNotificationsOffline(
 
       const title =
         dueToday.length === 1
-          ? `📞 আজ ${primary.name}-এর খোঁজ নেওয়ার দিন!`
-          : `📞 আজ ${dueToday.length} জন পরিচিতের খোঁজ নেওয়ার দিন!`;
+          ? `আজ ${primary.name}-এর খোঁজ নেওয়ার দিন!`
+          : `আজ ${dueToday.length} জন পরিচিতের খোঁজ নেওয়ার দিন!`;
 
       const body =
         dueToday.length === 1
@@ -240,7 +241,7 @@ export async function scheduleContactNotificationsOffline(
         await Notifications.scheduleNotificationAsync({
           identifier: `contact-due-${contact.id}`,
           content: {
-            title: `🔔 আজ ${contact.name}-এর সাথে কথা বলার দিন!`,
+            title: `আজ ${contact.name}-এর সাথে কথা বলার দিন!`,
             body: `${catLabel} তালিকায় থাকা ${contact.name}-এর সাথে যোগাযোগ করে সম্পর্ক ভালো রাখুন।${contact.note ? ` (${contact.note})` : ""}`,
             sound: "default",
             data: {
@@ -272,7 +273,7 @@ export async function triggerInstantContactNotification(
     const name = contactName || "তানভীর আহমেদ";
     const cat = categoryLabel || "ঘনিষ্ঠ বন্ধু (Category 2)";
 
-    const title = `📞 আজ ${name}-এর খোঁজ নেওয়ার দিন!`;
+    const title = `আজ ${name}-এর খোঁজ নেওয়ার দিন!`;
     const body = `আপনার ${cat} লিস্টের "${name}"-এর সাথে কথা বলার সময় হয়েছে। এখনই একটি কল বা WhatsApp মেসেজ দিন!`;
 
     await Notifications.scheduleNotificationAsync({
@@ -304,7 +305,10 @@ export async function triggerInstantContactNotification(
 export async function addInAppNotice(notice: AppNoticeItem): Promise<void> {
   try {
     const raw = await AsyncStorage.getItem(IN_APP_NOTICES_KEY);
-    const list: AppNoticeItem[] = raw ? JSON.parse(raw) : [];
+    const cutoff = Date.now() - SEVEN_DAYS_MS;
+    const list: AppNoticeItem[] = raw
+      ? (JSON.parse(raw) as AppNoticeItem[]).filter((n) => n.timestamp >= cutoff)
+      : [];
     const exists = list.some((n) => n.id === notice.id);
     if (exists) return;
     const updated = [notice, ...list].slice(0, 50);
@@ -315,21 +319,31 @@ export async function addInAppNotice(notice: AppNoticeItem): Promise<void> {
 export async function getInAppNotices(): Promise<AppNoticeItem[]> {
   try {
     const raw = await AsyncStorage.getItem(IN_APP_NOTICES_KEY);
-    if (raw) {
-      return JSON.parse(raw);
+    if (raw !== null) {
+      const parsed: AppNoticeItem[] = JSON.parse(raw);
+      const cutoff = Date.now() - SEVEN_DAYS_MS;
+      const pruned = parsed.filter((n) => n.timestamp >= cutoff);
+      if (pruned.length !== parsed.length) {
+        await AsyncStorage.setItem(IN_APP_NOTICES_KEY, JSON.stringify(pruned));
+      }
+      return pruned;
     }
   } catch {}
-  return [
+  const initial: AppNoticeItem[] = [
     {
       id: "welcome-1",
-      title: "Focus Lock & Smart CRM Ready 🛡️",
+      title: "Focus Lock & Smart CRM Ready",
       message:
-        "২৫+৫ মিনিটের সেশন লক, ০-৫ ইমার্জেন্সি পাস এবং ৩-ক্যাটাগরির কন্টাক্ট রিমাইন্ডার এখন অফলাইন ও অনলাইনে প্রস্তুত!",
+        "২৫+৫ মিনিটের সেশন লক, ৫০+১০ মিনিটের শিডিউল লক, ০-৫ ইমার্জেন্সি পাস এবং ৩-ক্যাটাগরির কন্টাক্ট রিমাইন্ডার প্রস্তুত!",
       timestamp: Date.now() - 3600 * 1000,
       read: false,
       type: "system",
     },
   ];
+  try {
+    await AsyncStorage.setItem(IN_APP_NOTICES_KEY, JSON.stringify(initial));
+  } catch {}
+  return initial;
 }
 
 export async function markAllInAppNoticesRead(): Promise<AppNoticeItem[]> {
@@ -341,6 +355,23 @@ export async function markAllInAppNoticesRead(): Promise<AppNoticeItem[]> {
   } catch {
     return [];
   }
+}
+
+export async function deleteInAppNotice(id: string): Promise<AppNoticeItem[]> {
+  try {
+    const list = await getInAppNotices();
+    const updated = list.filter((n) => n.id !== id);
+    await AsyncStorage.setItem(IN_APP_NOTICES_KEY, JSON.stringify(updated));
+    return updated;
+  } catch {
+    return [];
+  }
+}
+
+export async function clearAllInAppNotices(): Promise<void> {
+  try {
+    await AsyncStorage.setItem(IN_APP_NOTICES_KEY, JSON.stringify([]));
+  } catch {}
 }
 
 // ============================================================================
@@ -361,7 +392,7 @@ export interface CachedUserProfile {
 }
 
 /**
- * 🌟 Anti-Cheat Online Pass Spending Check:
+ * Anti-Cheat Online Pass Spending Check:
  * Verifies internet connection & updates `totalPassesUsed` in Supabase Cloud FIRST
  * before unlocking so user cannot spend pass offline and Clear App Data!
  */
@@ -444,6 +475,7 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
       streakDays: 0,
       totalCompleted: 0,
       lastCompletedDate: "",
+      completedHistoryJson: "{}",
     };
 
     if (Platform.OS === "android" && FocusLock?.getFocusSessionState) {
@@ -456,6 +488,7 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
           streakDays: s.streakDays ?? 0,
           totalCompleted: s.totalCompleted ?? 0,
           lastCompletedDate: s.lastCompletedDate || "",
+          completedHistoryJson: s.completedHistoryJson || "{}",
         };
       } catch {}
     }
@@ -473,7 +506,6 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
 
     await AsyncStorage.setItem(OFFLINE_SYNC_QUEUE_KEY, "true");
 
-    // Fetch cloud metadata first so we monotonically merge Earned/Used counters without losing anything!
     const {
       data: { user: currentUser },
     } = await supabase.auth.getUser();
@@ -498,7 +530,22 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
       mergedStreak = Math.max(mergedStreak, cloudStreak);
     }
 
-    // Update native storage with merged monotonic counters if cloud had higher values
+    // Merge 60-day GitHub-style daily history map monotonically
+    let localHistoryObj: Record<string, number> = {};
+    try {
+      localHistoryObj = JSON.parse(nativeLockState.completedHistoryJson || "{}");
+    } catch {}
+    const cloudHistoryObj: Record<string, number> =
+      cloudBackup.completedHistory || {};
+    const mergedHistoryObj: Record<string, number> = { ...cloudHistoryObj };
+    Object.keys(localHistoryObj).forEach((k) => {
+      mergedHistoryObj[k] = Math.max(
+        mergedHistoryObj[k] || 0,
+        localHistoryObj[k] || 0,
+      );
+    });
+    const mergedHistoryJson = JSON.stringify(mergedHistoryObj);
+
     if (Platform.OS === "android" && FocusLock?.syncPassAndStreakFromCloud) {
       await FocusLock.syncPassAndStreakFromCloud(
         mergedPasses,
@@ -506,6 +553,7 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
         mergedLastDate,
         mergedEarned,
         mergedUsed,
+        mergedHistoryJson,
       );
     }
 
@@ -535,6 +583,7 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
         totalPassesUsed: mergedUsed,
         streakDays: mergedStreak,
         lastCompletedDate: mergedLastDate,
+        completedHistory: mergedHistoryObj,
         totalCompleted: Math.max(
           nativeLockState.totalCompleted,
           cloudBackup.totalCompleted ?? 0,
@@ -632,7 +681,6 @@ export async function restoreCloudBackupAfterGoogleLogin(): Promise<void> {
         }
       }
 
-      // 🌟 Monotonic Anti-Cheat Merge: Never overwrites newly earned local passes with older cloud data!
       if (Platform.OS === "android" && FocusLock?.syncPassAndStreakFromCloud) {
         await FocusLock.syncPassAndStreakFromCloud(
           backup.emergencyPasses ?? 0,
@@ -640,11 +688,11 @@ export async function restoreCloudBackupAfterGoogleLogin(): Promise<void> {
           backup.lastCompletedDate || "",
           backup.totalPassesEarned ?? backup.emergencyPasses ?? 0,
           backup.totalPassesUsed ?? 0,
+          JSON.stringify(backup.completedHistory || {}),
         );
       }
     }
 
-    // Immediately sync merged local state back to cloud & update cached profile
     await syncLocalDataToCloudIfOnline();
   } catch {}
 }

@@ -1,38 +1,34 @@
-import { Ionicons } from "@expo/vector-icons";
+import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { Tabs } from "expo-router";
-import { StatusBar } from "expo-status-bar";
-// 🌟 এই হুকটি ইমপোর্ট করুন
+import React from "react";
+import { View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 export default function TabLayout() {
-  // মোবাইলের সেফ এরিয়া (উপরের নচ এবং নিচের বাটন) মাপার জন্য
   const insets = useSafeAreaInsets();
 
-  return ( <>
-
+  return (
     <Tabs
       screenOptions={{
         headerShown: false,
-        tabBarActiveTintColor: "#4F46E5",
-        tabBarInactiveTintColor: "#64748b",
+        tabBarActiveTintColor: "#818CF8",
+        tabBarInactiveTintColor: "#64748B",
         tabBarStyle: {
-          backgroundColor: "#ffffff",
+          backgroundColor: "#0B1120",
           borderTopWidth: 1,
-          borderTopColor: "#f1f5f9",
-          elevation: 15,
-          shadowColor: "#0f172a",
-          shadowOffset: { width: 0, height: -4 },
-          shadowOpacity: 0.05,
-          shadowRadius: 10,
-
-          // 🔥 ম্যাজিক এখানে: বাটনের উচ্চতা অনুযায়ী অটো হাইট এবং প্যাডিং নেবে
-          height: 60 + insets.bottom,
-          paddingBottom: insets.bottom > 0 ? insets.bottom : 12,
-          paddingTop: 2,
+          borderTopColor: "#1E293B",
+          elevation: 20,
+          shadowColor: "#000000",
+          shadowOffset: { width: 0, height: -6 },
+          shadowOpacity: 0.35,
+          shadowRadius: 12,
+          height: 64 + insets.bottom,
+          paddingBottom: insets.bottom > 0 ? insets.bottom : 10,
+          paddingTop: 6,
         },
         tabBarLabelStyle: {
           fontSize: 11,
-          fontWeight: "600",
+          fontWeight: "700",
           marginTop: 2,
         },
       }}
@@ -42,11 +38,17 @@ export default function TabLayout() {
         options={{
           title: "Home",
           tabBarIcon: ({ color, focused }) => (
-            <Ionicons
-              name={focused ? "home" : "home-outline"}
-              color={color}
-              size={24}
-            />
+            <View
+              className={`px-3.5 py-1 rounded-full ${
+                focused ? "bg-indigo-500/15" : ""
+              }`}
+            >
+              <MaterialCommunityIcons
+                name={focused ? "view-dashboard" : "view-dashboard-outline"}
+                color={color}
+                size={22}
+              />
+            </View>
           ),
         }}
       />
@@ -54,13 +56,19 @@ export default function TabLayout() {
       <Tabs.Screen
         name="notice"
         options={{
-          title: "Notice",
+          title: "Alerts",
           tabBarIcon: ({ color, focused }) => (
-            <Ionicons
-              name={focused ? "notifications" : "notifications-outline"}
-              color={color}
-              size={24}
-            />
+            <View
+              className={`px-3.5 py-1 rounded-full ${
+                focused ? "bg-indigo-500/15" : ""
+              }`}
+            >
+              <MaterialCommunityIcons
+                name={focused ? "bell-ring" : "bell-outline"}
+                color={color}
+                size={22}
+              />
+            </View>
           ),
         }}
       />
@@ -70,15 +78,20 @@ export default function TabLayout() {
         options={{
           title: "Profile",
           tabBarIcon: ({ color, focused }) => (
-            <Ionicons
-              name={focused ? "person" : "person-outline"}
-              color={color}
-              size={24}
-            />
+            <View
+              className={`px-3.5 py-1 rounded-full ${
+                focused ? "bg-indigo-500/15" : ""
+              }`}
+            >
+              <MaterialCommunityIcons
+                name={focused ? "account-circle" : "account-circle-outline"}
+                color={color}
+                size={22}
+              />
+            </View>
           ),
         }}
       />
     </Tabs>
-      </>
   );
 }

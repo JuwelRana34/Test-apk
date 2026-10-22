@@ -2,7 +2,7 @@
   "expo": {
     "name": "Jnuits",
     "slug": "Jnuits",
-    "version": "1.6.0",
+    "version": "1.7.0",
     "orientation": "portrait",
     "icon": "./assets/expo.icon/Assets/Jnulogo.png",
     "scheme": "jnuits",
@@ -21,6 +21,7 @@
         "backgroundColor": "#0F172A",
         "foregroundImage": "./assets/expo.icon/Assets/Jnulogo.png"
       },
+      "softwareKeyboardLayoutMode": "pan",
       "predictiveBackGestureEnabled": false,
       "package": "com.juwel522.myapp",
       "permissions": [

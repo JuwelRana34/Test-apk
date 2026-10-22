@@ -1,4 +1,4 @@
-import { Ionicons } from "@expo/vector-icons";
+import { Feather, Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useFocusEffect, useIsFocused, useRouter } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import React, { useCallback, useMemo, useState } from "react";
@@ -6,6 +6,8 @@ import { Alert, FlatList, Linking, Pressable, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
   AppNoticeItem,
+  clearAllInAppNotices,
+  deleteInAppNotice,
   getInAppNotices,
   markAllInAppNoticesRead,
   triggerInstantContactNotification,
@@ -32,6 +34,30 @@ export default function Notice() {
   const handleMarkAllRead = async () => {
     const updated = await markAllInAppNoticesRead();
     setNotices(updated);
+  };
+
+  const handleDeleteSingle = async (id: string) => {
+    const updated = await deleteInAppNotice(id);
+    setNotices(updated);
+  };
+
+  const handleClearAll = () => {
+    if (notices.length === 0) return;
+    Alert.alert(
+      "সব নোটিফিকেশন মুছে ফেলবেন?",
+      "আপনি কি নিশ্চিতভাবে সব নোটিফিকেশন লিস্ট থেকে মুছে ফেলতে চান?",
+      [
+        { text: "না", style: "cancel" },
+        {
+          text: "হ্যাঁ, সব মুছুন",
+          style: "destructive",
+          onPress: async () => {
+            await clearAllInAppNotices();
+            setNotices([]);
+          },
+        },
+      ],
+    );
   };
 
   const handleTestPushNotification = async () => {
@@ -66,19 +92,26 @@ export default function Notice() {
   };
 
   return (
-    <View className="flex-1 bg-[#0F172A]">
+    <View className="flex-1 bg-[#0B1120]">
       {isFocused && <StatusBar style="light" />}
 
-      {/* 🌟 Modern Header & Filter Tabs */}
+      {/* Modern Header & Filter Tabs */}
       <View
         style={{ paddingTop: Math.max(16, insets.top + 8) }}
-        className="bg-[#1E293B] px-5 pb-4 rounded-b-[28px] border-b border-slate-700/80"
+        className="bg-[#131C31] px-5 pb-4 rounded-b-[28px] border-b border-slate-800"
       >
-        <View className="flex-row items-center justify-between mb-1">
+        <View className="flex-row items-center justify-between mb-1.5">
           <View className="flex-row items-center flex-1 pr-2">
+            <View className="w-9 h-9 rounded-xl bg-indigo-500/15 border border-indigo-500/30 items-center justify-center mr-2.5">
+              <MaterialCommunityIcons
+                name="bell-badge-outline"
+                size={20}
+                color="#818CF8"
+              />
+            </View>
             <Text
               allowFontScaling={false}
-              className="text-2xl font-black text-white"
+              className="text-xl font-black text-white"
             >
               Notifications
             </Text>
@@ -94,15 +127,19 @@ export default function Notice() {
             )}
           </View>
 
-          <View className="flex-row items-center gap-2">
+          <View className="flex-row items-center gap-1.5">
             <Pressable
               onPress={() => void handleTestPushNotification()}
-              className="bg-emerald-500/15 border border-emerald-500/40 px-3 py-1.5 rounded-xl flex-row items-center"
+              className="bg-emerald-500/15 border border-emerald-500/40 px-2.5 py-1.5 rounded-xl flex-row items-center"
             >
-              <Ionicons name="notifications" size={14} color="#34D399" />
+              <MaterialCommunityIcons
+                name="bell-ring-outline"
+                size={13}
+                color="#34D399"
+              />
               <Text
                 allowFontScaling={false}
-                className="font-bold text-xs text-emerald-300 ml-1"
+                className="font-bold text-[11px] text-emerald-300 ml-1"
               >
                 Test
               </Text>
@@ -110,64 +147,98 @@ export default function Notice() {
 
             <Pressable
               onPress={() => void handleMarkAllRead()}
-              className="bg-indigo-500/15 border border-indigo-500/40 px-3 py-1.5 rounded-xl"
+              className="bg-indigo-500/15 border border-indigo-500/40 px-2.5 py-1.5 rounded-xl flex-row items-center"
             >
+              <MaterialCommunityIcons
+                name="check-all"
+                size={14}
+                color="#818CF8"
+              />
               <Text
                 allowFontScaling={false}
-                className="font-bold text-xs text-indigo-300"
+                className="font-bold text-[11px] text-indigo-300 ml-1"
               >
-                ✓ Read All
+                Read
               </Text>
             </Pressable>
+
+            {notices.length > 0 && (
+              <Pressable
+                onPress={handleClearAll}
+                className="bg-rose-500/15 border border-rose-500/40 px-2.5 py-1.5 rounded-xl flex-row items-center"
+              >
+                <Feather name="trash-2" size={13} color="#F43F5E" />
+                <Text
+                  allowFontScaling={false}
+                  className="font-bold text-[11px] text-rose-300 ml-1"
+                >
+                  Clear All
+                </Text>
+              </Pressable>
+            )}
           </View>
         </View>
 
         <Text
           allowFontScaling={false}
-          className="text-xs text-slate-400 mb-3.5"
+          className="text-[11px] text-slate-400 mb-3"
         >
-          কন্টাক্ট রিমাইন্ডার ও ফোকাস লক অ্যালার্ট (অনলাইন ও অফলাইনে সচল)
+          কন্টাক্ট রিমাইন্ডার ও ফোকাস অ্যালার্ট • ৭ দিনের পুরোনো নোটিফিকেশন অটো ক্লিন হয়
         </Text>
 
-        {/* Filter Pills */}
-        <View className="flex-row bg-slate-900 p-1 rounded-2xl border border-slate-700/80">
+        {/* Filter Pills with Vector Icons */}
+        <View className="flex-row bg-[#0B1120] p-1 rounded-2xl border border-slate-800">
           {[
-            { id: "all", label: `All (${notices.length})` },
+            {
+              id: "all",
+              label: `All (${notices.length})`,
+              icon: "layers-outline" as const,
+            },
             {
               id: "contact",
-              label: `Contacts 📞 (${notices.filter((n) => n.type === "contact").length})`,
+              label: `Contacts (${notices.filter((n) => n.type === "contact").length})`,
+              icon: "call-outline" as const,
             },
             {
               id: "lock",
-              label: `Focus Lock 🛡️ (${notices.filter((n) => n.type === "lock").length})`,
+              label: `Focus Lock (${notices.filter((n) => n.type === "lock").length})`,
+              icon: "shield-checkmark-outline" as const,
             },
-          ].map((tab) => (
-            <Pressable
-              key={tab.id}
-              onPress={() => setFilter(tab.id as any)}
-              className={`flex-1 py-2 px-1 rounded-xl items-center justify-center ${
-                filter === tab.id ? "bg-indigo-600" : ""
-              }`}
-            >
-              <Text
-                allowFontScaling={false}
-                numberOfLines={1}
-                className={`font-bold text-[11px] ${
-                  filter === tab.id ? "text-white" : "text-slate-400"
+          ].map((tab) => {
+            const active = filter === tab.id;
+            return (
+              <Pressable
+                key={tab.id}
+                onPress={() => setFilter(tab.id as any)}
+                className={`flex-1 py-2 px-1 rounded-xl flex-row items-center justify-center ${
+                  active ? "bg-indigo-600" : ""
                 }`}
               >
-                {tab.label}
-              </Text>
-            </Pressable>
-          ))}
+                <Ionicons
+                  name={tab.icon}
+                  size={13}
+                  color={active ? "#FFFFFF" : "#94A3B8"}
+                />
+                <Text
+                  allowFontScaling={false}
+                  numberOfLines={1}
+                  className={`font-bold text-[11px] ml-1 ${
+                    active ? "text-white" : "text-slate-400"
+                  }`}
+                >
+                  {tab.label}
+                </Text>
+              </Pressable>
+            );
+          })}
         </View>
       </View>
 
       {filteredNotices.length === 0 ? (
         <View className="flex-1 items-center justify-center px-8 pb-16">
-          <View className="w-20 h-20 rounded-full bg-slate-800 border border-slate-700 items-center justify-center mb-4">
-            <Ionicons
-              name="notifications-off-outline"
+          <View className="w-20 h-20 rounded-full bg-slate-900 border border-slate-800 items-center justify-center mb-4">
+            <MaterialCommunityIcons
+              name="bell-sleep-outline"
               size={34}
               color="#64748B"
             />
@@ -210,8 +281,8 @@ export default function Notice() {
                 }}
                 className={`rounded-3xl p-4 border ${
                   item.read
-                    ? "bg-slate-800/70 border-slate-700/70"
-                    : "bg-slate-800 border-indigo-500/50"
+                    ? "bg-[#131C31]/80 border-slate-800"
+                    : "bg-[#131C31] border-indigo-500/50"
                 }`}
               >
                 <View className="flex-row">
@@ -224,13 +295,13 @@ export default function Notice() {
                           : "bg-indigo-500/15 border-indigo-500/30"
                     }`}
                   >
-                    <Ionicons
+                    <MaterialCommunityIcons
                       name={
                         isContact
-                          ? "call"
+                          ? "phone-incoming"
                           : isLock
-                            ? "shield-checkmark"
-                            : "notifications"
+                            ? "shield-lock"
+                            : "bell-ring"
                       }
                       size={22}
                       color={
@@ -248,12 +319,22 @@ export default function Notice() {
                       >
                         {item.title}
                       </Text>
-                      <Text
-                        allowFontScaling={false}
-                        className="text-[11px] text-slate-400"
-                      >
-                        {formatRelativeTime(item.timestamp)}
-                      </Text>
+
+                      <View className="flex-row items-center gap-2">
+                        <Text
+                          allowFontScaling={false}
+                          className="text-[11px] text-slate-400"
+                        >
+                          {formatRelativeTime(item.timestamp)}
+                        </Text>
+                        <Pressable
+                          onPress={() => void handleDeleteSingle(item.id)}
+                          hitSlop={10}
+                          className="h-7 w-7 rounded-lg bg-slate-800/90 border border-slate-700/70 items-center justify-center active:bg-rose-500/20"
+                        >
+                          <Feather name="trash-2" size={13} color="#F43F5E" />
+                        </Pressable>
+                      </View>
                     </View>
 
                     <Text
@@ -304,7 +385,7 @@ export default function Notice() {
                   </View>
 
                   {!item.read && (
-                    <View className="ml-2 mt-1 h-2.5 w-2.5 rounded-full bg-rose-500" />
+                    <View className="ml-1.5 mt-1 h-2.5 w-2.5 rounded-full bg-rose-500" />
                   )}
                 </View>
               </Pressable>

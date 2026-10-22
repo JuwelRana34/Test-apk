@@ -1,6 +1,7 @@
-import { Ionicons } from "@expo/vector-icons";
+import { Feather, Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import DateTimePicker from "@react-native-community/datetimepicker";
+import * as DocumentPicker from "expo-document-picker";
 import { StatusBar } from "expo-status-bar";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -11,7 +12,9 @@ import {
   BackHandler,
   Image,
   ImageBackground,
+  Keyboard,
   KeyboardAvoidingView,
+  Linking,
   Modal,
   NativeModules,
   PermissionsAndroid,
@@ -54,6 +57,7 @@ interface FocusSessionState {
   endTimeMillis: number;
   lockMode: "SESSION" | "SCHEDULE";
   pomodoroEnabled: boolean;
+  scheduleBreakEnabled?: boolean;
   isBreakActive: boolean;
   cycleRemainingMillis: number;
   emergencyPasses: number;
@@ -65,6 +69,7 @@ interface FocusSessionState {
   ytUsedMinutes: number;
   ytLimitMinutes: number;
   lastCompletedDate?: string;
+  completedHistoryJson?: string;
 }
 
 interface NativeFocusLock {
@@ -80,8 +85,10 @@ interface NativeFocusLock {
   saveAllowedApps: (apps: string[]) => Promise<boolean>;
   saveAllowedDomains?: (domains: string[]) => Promise<boolean>;
   setYouTubeLimitMinutes?: (limitMinutes: number) => Promise<boolean>;
+  setScheduleBreakEnabled?: (enabled: boolean) => Promise<boolean>;
   openApp: (packageName: string) => Promise<boolean>;
   openUrlInChrome?: (domainOrUrl: string) => Promise<boolean>;
+  openPdfUri?: (uriString: string) => Promise<boolean>;
 
   startQuickFocus: (
     durationMinutes: number,
@@ -129,6 +136,9 @@ const DAYS = [
 
 const MAX_SELECTED_APPS = 6;
 const MAX_ALLOWED_DOMAINS = 5;
+const MAX_SESSION_MINUTES = 360; // Max 6 Hours for Session Lock
+const MAX_SCHEDULE_MINUTES = 600; // Max 10 Hours for Schedule Lock
+
 const DEFAULT_ALLOWED_DOMAINS = [
   "github.com",
   "stackoverflow.com",
@@ -153,12 +163,25 @@ const getAppColor = (name: string) => {
   return colors[name.length % colors.length];
 };
 
+// Calculate schedule duration in minutes across midnight
+const getScheduleDurationMinutes = (start: Date, end: Date): number => {
+  const startMins = start.getHours() * 60 + start.getMinutes();
+  const endMins = end.getHours() * 60 + end.getMinutes();
+  let diff = endMins - startMins;
+  if (diff <= 0) {
+    diff += 24 * 60;
+  }
+  return diff;
+};
+
 export default function StrictFocusScreen() {
   const insets = useSafeAreaInsets();
 
   const [customDuration, setCustomDuration] = useState("60");
   const [pomodoroEnabled, setPomodoroEnabled] = useState(true);
+  const [scheduleBreakEnabled, setScheduleBreakEnabledState] = useState(true);
   const [ytLimitMinutes, setYtLimitMinutes] = useState(90);
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
 
   const [permState, setPermState] = useState({
     accessibility: false,
@@ -212,6 +235,20 @@ export default function StrictFocusScreen() {
   const isStartingFocusRef = useRef(false);
   const isHoldPressActiveRef = useRef(false);
 
+  // Track Android/iOS soft keyboard height so inputs inside Modals never get covered!
+  useEffect(() => {
+    const showSub = Keyboard.addListener("keyboardDidShow", (e) => {
+      setKeyboardHeight(e.endCoordinates?.height || 0);
+    });
+    const hideSub = Keyboard.addListener("keyboardDidHide", () => {
+      setKeyboardHeight(0);
+    });
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
+
   const checkAllPermissions = useCallback(async () => {
     if (Platform.OS !== "android" || !FocusLock) return;
     try {
@@ -242,6 +279,9 @@ export default function StrictFocusScreen() {
         active ? Math.max(0, session.endTimeMillis - Date.now()) : 0,
       );
       setLockMode(session.lockMode || "SESSION");
+      if (typeof session.scheduleBreakEnabled === "boolean") {
+        setScheduleBreakEnabledState(session.scheduleBreakEnabled);
+      }
       setIsBreakActive(!!session.isBreakActive);
       setCycleRemainingMillis(Math.max(0, session.cycleRemainingMillis || 0));
       setEmergencyPasses(session.emergencyPasses ?? 0);
@@ -312,13 +352,19 @@ export default function StrictFocusScreen() {
 
   const loadSettings = async () => {
     try {
-      const [savedApps, savedDomains, savedSchedules, savedYtLimit] =
-        await Promise.all([
-          AsyncStorage.getItem("@focus_allowed_apps"),
-          AsyncStorage.getItem("@focus_allowed_domains"),
-          AsyncStorage.getItem("@focus_multi_schedules"),
-          AsyncStorage.getItem("@focus_yt_limit_minutes"),
-        ]);
+      const [
+        savedApps,
+        savedDomains,
+        savedSchedules,
+        savedYtLimit,
+        savedSchedBreak,
+      ] = await Promise.all([
+        AsyncStorage.getItem("@focus_allowed_apps"),
+        AsyncStorage.getItem("@focus_allowed_domains"),
+        AsyncStorage.getItem("@focus_multi_schedules"),
+        AsyncStorage.getItem("@focus_yt_limit_minutes"),
+        AsyncStorage.getItem("@focus_schedule_break_enabled"),
+      ]);
 
       if (savedApps) {
         const parsedApps: string[] = JSON.parse(savedApps).slice(
@@ -352,6 +398,14 @@ export default function StrictFocusScreen() {
         setYtLimitMinutes(limit);
       }
 
+      if (savedSchedBreak !== null) {
+        const enabled = savedSchedBreak === "true";
+        setScheduleBreakEnabledState(enabled);
+        if (FocusLock?.setScheduleBreakEnabled) {
+          await FocusLock.setScheduleBreakEnabled(enabled);
+        }
+      }
+
       if (savedSchedules) {
         const parsed = JSON.parse(savedSchedules);
         setSchedules(
@@ -365,6 +419,54 @@ export default function StrictFocusScreen() {
     } catch {}
   };
 
+  const toggleScheduleBreak = async (val: boolean) => {
+    setScheduleBreakEnabledState(val);
+    await AsyncStorage.setItem(
+      "@focus_schedule_break_enabled",
+      val ? "true" : "false",
+    );
+    if (FocusLock?.setScheduleBreakEnabled) {
+      await FocusLock.setScheduleBreakEnabled(val);
+    }
+  };
+
+  // Pick & Open Study PDF directly from Lock Screen (Only .pdf files allowed!)
+  const handlePickAndReadStudyPdf = async () => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: "application/pdf",
+        copyToCacheDirectory: true,
+      });
+
+      if (result.canceled || !result.assets || result.assets.length === 0) {
+        return;
+      }
+
+      const asset = result.assets[0];
+      const fileName = (asset.name || "").toLowerCase();
+      const mime = (asset.mimeType || "").toLowerCase();
+
+      if (!fileName.endsWith(".pdf") && mime !== "application/pdf") {
+        Alert.alert(
+          "শুধুমাত্র PDF ফাইল অনুমোদিত",
+          "লক চলাকালীন শুধুমাত্র পড়াশোনার .pdf ফাইল ওপেন করা যাবে।",
+        );
+        return;
+      }
+
+      if (Platform.OS === "android" && FocusLock?.openPdfUri) {
+        await FocusLock.openPdfUri(asset.uri);
+      } else {
+        await Linking.openURL(asset.uri);
+      }
+    } catch {
+      Alert.alert(
+        "PDF ওপেন করা যায়নি",
+        "ফোনে News Plus বা Google Drive PDF Viewer ইনস্টল করা আছে কি না চেক করুন।",
+      );
+    }
+  };
+
   const verifyRequiredPermissionsBeforeLock = async (): Promise<boolean> => {
     if (Platform.OS !== "android" || !FocusLock) return false;
     const acc = await FocusLock.isAccessibilityServiceEnabled();
@@ -375,8 +477,8 @@ export default function StrictFocusScreen() {
     if (!ovl || !acc) {
       setSettingsModalVisible(true);
       Alert.alert(
-        "সিস্টেম পারমিশন প্রয়োজন ⚙️",
-        "লক চালু করার আগে Settings থেকে 'Display Over Other Apps' এবং 'Accessibility Service' অন করুন।",
+        "সিস্টেম পারমিশন প্রয়োজন",
+        "লক চালু করার আগে Settings থেকে প্রয়োজনীয় সিস্টেম পারমিশনগুলো অন করুন।",
       );
       return false;
     }
@@ -415,6 +517,20 @@ export default function StrictFocusScreen() {
   ): Promise<void> => {
     try {
       if (!FocusLock) return;
+
+      // Enforce Max 10 Hours (600 minutes) per Schedule Lock!
+      for (let i = 0; i < schedulesToSave.length; i++) {
+        const s = schedulesToSave[i];
+        const durMins = getScheduleDurationMinutes(s.startTime, s.endTime);
+        if (durMins > MAX_SCHEDULE_MINUTES) {
+          Alert.alert(
+            "সর্বোচ্চ ১০ ঘণ্টার সীমা (Schedule Limit)",
+            `Schedule ${i + 1}-এর সময়কাল ${(durMins / 60).toFixed(1)} ঘণ্টা দেওয়া হয়েছে। নিরাপত্তার জন্য Schedule Lock একটানা সর্বোচ্চ ১০ ঘণ্টার (৬০০ মিনিট) বেশি সেট করা যাবে না।`,
+          );
+          return;
+        }
+      }
+
       const hasEnabled = schedulesToSave.some((s) => s.isEnabled);
 
       if (hasEnabled && !(await verifyRequiredPermissionsBeforeLock())) {
@@ -453,9 +569,9 @@ export default function StrictFocusScreen() {
       if (!silent) {
         Vibration.vibrate(100);
         Alert.alert(
-          "Schedule Lock সেভ হয়েছে ⏰",
+          "Schedule Lock সেভ হয়েছে",
           hasEnabled
-            ? "আপনার নির্ধারিত সময়ে প্রতিদিন অটোমেটিক কড়া লক চালু হয়ে যাবে।"
+            ? "আপনার নির্ধারিত সময়ে প্রতিদিন অটোমেটিক কড়া লক (সর্বোচ্চ ১০ ঘণ্টা) চালু হয়ে যাবে।"
             : "শিডিউল সেভ হয়েছে (বর্তমানে অফ করা আছে)।",
         );
       }
@@ -469,6 +585,16 @@ export default function StrictFocusScreen() {
     const parsedDuration = parseInt(customDuration, 10);
     if (isNaN(parsedDuration) || parsedDuration <= 0) {
       Alert.alert("সময় সঠিক নয়", "কত মিনিট লক করতে চান তা সঠিকভাবে লিখুন।");
+      return;
+    }
+
+    // Enforce Max 6 Hours (360 minutes) for Session Lock!
+    if (parsedDuration > MAX_SESSION_MINUTES) {
+      setCustomDuration(String(MAX_SESSION_MINUTES));
+      Alert.alert(
+        "সর্বোচ্চ ৬ ঘণ্টার সীমা (Session Limit)",
+        "নিরাপত্তার জন্য Session Lock একটানা সর্বোচ্চ ৬ ঘণ্টা (৩৬০ মিনিট) পর্যন্ত দেওয়া যাবে। সময় ৩৬০ মিনিটে সেট করা হয়েছে।",
+      );
       return;
     }
 
@@ -502,12 +628,11 @@ export default function StrictFocusScreen() {
     }
   };
 
-  // 🌟 Anti-Cheat Emergency Unlock: Requires Online Cloud Sync so user cannot spend pass offline & Clear Data!
   const handleEmergencyUnlockConfirm = async () => {
     if (!FocusLock?.useEmergencyPass) return;
     if (emergencyPasses <= 0) {
       Alert.alert(
-        "কোনো Emergency Pass নেই 🔒",
+        "কোনো Emergency Pass নেই",
         "আপনার কাছে এখন ০টি পাস আছে। টানা ৩ দিন (কমপক্ষে ৩০ মিনিট করে) নিয়ম মেনে লক পূর্ণ করলে ১টি Emergency Pass পাবেন!",
       );
       setEmergencyModalVisible(false);
@@ -519,7 +644,7 @@ export default function StrictFocusScreen() {
       const canSpendOnline = await spendEmergencyPassWithCloudCheck();
       if (!canSpendOnline) {
         Alert.alert(
-          "ইন্টারনেট সংযোগ প্রয়োজন 🌐",
+          "ইন্টারনেট সংযোগ প্রয়োজন",
           "Emergency Pass ব্যবহার করে লক আনলক করার জন্য ফোনের ইন্টারনেট (Wi-Fi বা Mobile Data) চালু করুন।",
         );
         return;
@@ -533,7 +658,7 @@ export default function StrictFocusScreen() {
         await syncLocalDataToCloudIfOnline();
         await addInAppNotice({
           id: `pass-used-${Date.now()}`,
-          title: "🎟️ ১টি Emergency Pass ব্যবহৃত হয়েছে",
+          title: "১টি Emergency Pass ব্যবহৃত হয়েছে",
           message: `আপনি জরুরি প্রয়োজনে লক আনলক করেছেন। আপনার ১টি পাস কেটে ক্লাউডে আপডেট করা হয়েছে এবং ৩ দিনের স্ট্রিক কাউন্টার রিসেট হয়েছে।`,
           timestamp: Date.now(),
           read: false,
@@ -553,7 +678,7 @@ export default function StrictFocusScreen() {
     } else {
       if (selectedApps.length >= MAX_SELECTED_APPS) {
         Alert.alert(
-          "সর্বোচ্চ ৬টি অ্যাপ সিলেক্ট করা যাবে ✋",
+          "সর্বোচ্চ ৬টি অ্যাপ সিলেক্ট করা যাবে",
           "ফোকাস ধরে রাখতে লক চলাকালীন সর্বোচ্চ ৬টি জরুরি অ্যাপ ব্যবহারের অনুমতি দেওয়া যাবে।",
         );
         return;
@@ -577,7 +702,6 @@ export default function StrictFocusScreen() {
     } catch {}
   };
 
-  // 🌟 Enforces Max 5 Sites & Strictly Forbids YouTube in Chrome!
   const addDomain = async () => {
     const clean = newDomainInput
       .trim()
@@ -593,7 +717,7 @@ export default function StrictFocusScreen() {
 
     if (clean.includes("youtube.") || clean.includes("youtu.be")) {
       Alert.alert(
-        "YouTube যোগ করা যাবে না 🚫",
+        "YouTube যোগ করা যাবে না",
         "Chrome-এ YouTube ওয়েবসাইট যোগ করা নিষিদ্ধ! লং ভিডিও দেখতে চাইলে অ্যাপ লিস্ট থেকে সরাসরি YouTube অ্যাপ সিলেক্ট করুন।",
       );
       setNewDomainInput("");
@@ -602,7 +726,7 @@ export default function StrictFocusScreen() {
 
     if (allowedDomains.length >= MAX_ALLOWED_DOMAINS) {
       Alert.alert(
-        "সর্বোচ্চ ৫টি ওয়েবসাইট লিমিট ✋",
+        "সর্বোচ্চ ৫টি ওয়েবসাইট লিমিট",
         "ফোকাস ধরে রাখতে Chrome-এ সর্বোচ্চ ৫টি জরুরি ওয়েবসাইট যোগ করা যাবে। নতুন সাইট যোগ করতে আগের কোনোটি মুছে ফেলুন।",
       );
       return;
@@ -691,8 +815,12 @@ export default function StrictFocusScreen() {
       pkg === "com.sec.android.app.sbrowser",
   );
 
+  const isCycleModeActive =
+    (lockMode === "SESSION" && pomodoroEnabled) ||
+    (lockMode === "SCHEDULE" && scheduleBreakEnabled);
+
   // =========================================================================
-  // 1. ACTIVE LOCK SCREEN DASHBOARD (With Direct Chrome Website Links & Live YT Seconds!)
+  // 1. ACTIVE LOCK SCREEN DASHBOARD (With Read Study PDF, 50m/10m Schedule Break & Crisp Vector Icons!)
   // =========================================================================
   if (isFocusActive) {
     return (
@@ -713,16 +841,16 @@ export default function StrictFocusScreen() {
         >
           {/* Top Pass & Mode Pill */}
           <View className="flex-row items-center justify-between gap-2">
-            <View className="bg-slate-800/90 border border-slate-700 px-3 py-1.5 rounded-full flex-row items-center flex-shrink">
-              <Ionicons
+            <View className="bg-slate-900 border border-slate-800 px-3 py-1.5 rounded-full flex-row items-center flex-shrink">
+              <MaterialCommunityIcons
                 name={
-                  lockMode === "SCHEDULE"
-                    ? "calendar"
-                    : isBreakActive
-                      ? "cafe"
-                      : "shield-checkmark"
+                  isBreakActive
+                    ? "coffee"
+                    : lockMode === "SCHEDULE"
+                      ? "calendar-clock"
+                      : "shield-lock"
                 }
-                size={14}
+                size={15}
                 color={isBreakActive ? "#34D399" : "#F43F5E"}
               />
               <Text
@@ -731,7 +859,9 @@ export default function StrictFocusScreen() {
                 className="text-slate-200 font-bold text-[11px] ml-1.5"
               >
                 {lockMode === "SCHEDULE"
-                  ? "Schedule Lock"
+                  ? scheduleBreakEnabled
+                    ? "Schedule (50m / 10m)"
+                    : "Schedule Lock"
                   : pomodoroEnabled
                     ? "Session (25m / 5m)"
                     : "Session Lock"}
@@ -739,27 +869,39 @@ export default function StrictFocusScreen() {
             </View>
 
             <View className="bg-amber-500/15 border border-amber-500/30 px-3 py-1.5 rounded-full flex-row items-center">
-              <Ionicons name="ticket" size={14} color="#FBBF24" />
+              <MaterialCommunityIcons
+                name="ticket-confirmation"
+                size={14}
+                color="#FBBF24"
+              />
               <Text
                 allowFontScaling={false}
                 className="text-amber-300 font-bold text-[11px] ml-1.5"
               >
-                Pass: {emergencyPasses}/5 • Streak: {streakDays}/3
+                Pass: {emergencyPasses}/5
+              </Text>
+              <View className="w-[1px] h-3 bg-amber-500/30 mx-2" />
+              <MaterialCommunityIcons name="fire" size={14} color="#34D399" />
+              <Text
+                allowFontScaling={false}
+                className="text-emerald-300 font-bold text-[11px] ml-1"
+              >
+                {streakDays}/3d
               </Text>
             </View>
           </View>
 
           {/* Center Lock / Break Status */}
-          <View className="items-center my-3">
+          <View className="items-center my-2.5">
             <View
-              className={`w-18 h-18 p-4 rounded-full items-center justify-center border-2 ${
+              className={`p-4 rounded-full items-center justify-center border-2 ${
                 isBreakActive
                   ? "bg-emerald-500/15 border-emerald-400"
                   : "bg-rose-500/15 border-rose-500"
               }`}
             >
-              <Ionicons
-                name={isBreakActive ? "cafe" : "lock-closed"}
+              <MaterialCommunityIcons
+                name={isBreakActive ? "coffee-outline" : "shield-lock"}
                 size={36}
                 color={isBreakActive ? "#34D399" : "#F43F5E"}
               />
@@ -767,26 +909,37 @@ export default function StrictFocusScreen() {
 
             <Text
               allowFontScaling={false}
-              className="text-white text-xl font-black mt-3 text-center px-2"
+              className="text-white text-xl font-black mt-2.5 text-center px-2"
             >
               {isBreakActive
-                ? "৫ মিনিটের ফ্রি ব্রেক চলছে! ☕"
-                : "Strict Focus Lock Active 🔒"}
+                ? lockMode === "SCHEDULE"
+                  ? "১০ মিনিটের ফ্রি ব্রেক চলছে!"
+                  : "৫ মিনিটের ফ্রি ব্রেক চলছে!"
+                : "Strict Focus Lock Active"}
             </Text>
+
+            {isBreakActive && (
+              <Text
+                allowFontScaling={false}
+                className="text-amber-300/90 text-[11px] font-bold mt-1 text-center"
+              >
+                ব্রেকের মধ্যেও Reels ও YouTube Shorts সম্পূর্ণ ব্লকড আছে
+              </Text>
+            )}
 
             <Text
               allowFontScaling={false}
-              className={`text-4xl font-black mt-3 tracking-widest ${
+              className={`text-4xl font-black mt-2.5 tracking-widest ${
                 isBreakActive ? "text-emerald-400" : "text-rose-400"
               }`}
             >
-              {lockMode === "SESSION" && pomodoroEnabled
+              {isCycleModeActive
                 ? formatCountdown(cycleRemainingMillis)
                 : formatCountdown(remainingMillis)}
             </Text>
 
-            {lockMode === "SESSION" && pomodoroEnabled && (
-              <View className="bg-slate-800/80 px-3.5 py-1.5 rounded-full mt-2 border border-slate-700">
+            {isCycleModeActive && (
+              <View className="bg-slate-900 px-3.5 py-1.5 rounded-full mt-2 border border-slate-800">
                 <Text
                   allowFontScaling={false}
                   numberOfLines={1}
@@ -799,9 +952,49 @@ export default function StrictFocusScreen() {
             )}
           </View>
 
-          {/* Middle Section: Live YouTube Seconds Counter + Allowed Apps + Direct Chrome Links */}
+          {/* Middle Section: Read Study PDF Button + Live YT Seconds + Allowed Apps + Chrome Links */}
           <View>
-            {/* Live YouTube Usage Counter (Updates every second!) */}
+            {/* 🌟 NEW: Read Study PDF Button (.pdf-only picker + News Plus / Drive PDF Viewer) */}
+            <Pressable
+              onPress={() => void handlePickAndReadStudyPdf()}
+              className="bg-sky-500/15 border border-sky-500/40 rounded-2xl p-3 mb-2.5 flex-row items-center justify-between active:bg-sky-500/25"
+            >
+              <View className="flex-row items-center flex-1 pr-2">
+                <View className="w-9 h-9 rounded-xl bg-sky-500/20 border border-sky-400/30 items-center justify-center">
+                  <MaterialCommunityIcons
+                    name="file-pdf-box"
+                    size={22}
+                    color="#38BDF8"
+                  />
+                </View>
+                <View className="ml-2.5 flex-1">
+                  <Text
+                    allowFontScaling={false}
+                    className="text-white text-xs font-black"
+                  >
+                    Read Study PDF (Only .pdf)
+                  </Text>
+                  <Text
+                    allowFontScaling={false}
+                    numberOfLines={1}
+                    className="text-sky-200/80 text-[10px] mt-0.5"
+                  >
+                    News Plus বা Drive PDF ভিউয়ারে পড়ুন (ভিডিও অটো ব্লকড)
+                  </Text>
+                </View>
+              </View>
+              <View className="bg-sky-500 px-3 py-1.5 rounded-xl flex-row items-center">
+                <Feather name="book-open" size={12} color="#FFFFFF" />
+                <Text
+                  allowFontScaling={false}
+                  className="text-white font-black text-[11px] ml-1.5"
+                >
+                  Open PDF
+                </Text>
+              </View>
+            </Pressable>
+
+            {/* Live YouTube Usage Counter */}
             <View className="bg-slate-900/90 border border-slate-800 rounded-2xl p-3 mb-2.5 flex-row items-center justify-between">
               <View className="flex-row items-center flex-1 pr-2">
                 <Ionicons name="logo-youtube" size={16} color="#EF4444" />
@@ -848,12 +1041,12 @@ export default function StrictFocusScreen() {
                       {app.icon ? (
                         <Image
                           source={{ uri: `data:image/png;base64,${app.icon}` }}
-                          style={{ width: 36, height: 36, borderRadius: 9 }}
+                          style={{ width: 34, height: 34, borderRadius: 9 }}
                         />
                       ) : (
-                        <Ionicons
-                          name="apps"
-                          size={36}
+                        <MaterialCommunityIcons
+                          name="application"
+                          size={34}
                           color={getAppColor(app.appName)}
                         />
                       )}
@@ -870,11 +1063,15 @@ export default function StrictFocusScreen() {
               )}
             </View>
 
-            {/* 🌟 Direct Chrome Whitelisted Website Buttons (Shown when Chrome is whitelisted!) */}
+            {/* Direct Chrome Whitelisted Website Buttons */}
             {isChromeWhitelisted && allowedDomains.length > 0 && (
               <View className="bg-slate-900/90 border border-sky-500/30 rounded-3xl p-3.5 mt-2.5">
                 <View className="flex-row items-center justify-center mb-2.5">
-                  <Ionicons name="globe-outline" size={14} color="#38BDF8" />
+                  <MaterialCommunityIcons
+                    name="web"
+                    size={15}
+                    color="#38BDF8"
+                  />
                   <Text
                     allowFontScaling={false}
                     className="text-sky-300 text-[11px] font-bold ml-1.5"
@@ -895,7 +1092,7 @@ export default function StrictFocusScreen() {
                       }}
                       className="bg-sky-500/15 border border-sky-500/40 px-3 py-2 rounded-xl flex-row items-center active:bg-sky-500/30"
                     >
-                      <Ionicons name="open-outline" size={13} color="#38BDF8" />
+                      <Feather name="external-link" size={12} color="#38BDF8" />
                       <Text
                         allowFontScaling={false}
                         numberOfLines={1}
@@ -919,8 +1116,10 @@ export default function StrictFocusScreen() {
                 : "bg-slate-900 border-slate-800"
             }`}
           >
-            <Ionicons
-              name={emergencyPasses > 0 ? "ticket-outline" : "lock-closed"}
+            <MaterialCommunityIcons
+              name={
+                emergencyPasses > 0 ? "ticket-confirmation" : "lock-outline"
+              }
               size={18}
               color={emergencyPasses > 0 ? "#FBBF24" : "#64748B"}
             />
@@ -946,7 +1145,11 @@ export default function StrictFocusScreen() {
           <View className="flex-1 bg-black/80 justify-center items-center px-5">
             <View className="bg-slate-900 w-full rounded-3xl p-5 border border-slate-700 items-center">
               <View className="w-14 h-14 rounded-full bg-amber-500/20 border border-amber-500/40 items-center justify-center mb-3">
-                <Ionicons name="warning" size={28} color="#FBBF24" />
+                <MaterialCommunityIcons
+                  name="alert-octagon"
+                  size={28}
+                  color="#FBBF24"
+                />
               </View>
               <Text
                 allowFontScaling={false}
@@ -1005,24 +1208,29 @@ export default function StrictFocusScreen() {
   }
 
   // =========================================================================
-  // 2. NEW CLEAN UNLOCK SCREEN (Top-to-Middle Hero Image + Curved Bottom Sheet)
+  // 2. CLEAN UNLOCK SCREEN (Auto-Hides Granted Permissions + Max 6h/10h Limits)
   // =========================================================================
   const allPermsReady =
     permState.accessibility && permState.overlay && permState.deviceAdmin;
+  const missingPermsCount =
+    (permState.overlay ? 0 : 1) +
+    (permState.accessibility ? 0 : 1) +
+    (permState.deviceAdmin ? 0 : 1);
   const activeSchedulesCount = schedules.filter((s) => s.isEnabled).length;
 
   return (
-    <View className="flex-1 bg-[#0F172A]">
+    <View className="flex-1 bg-[#0B1120]">
       <StatusBar style="light" />
 
       <ScrollView
         className="flex-1"
+        keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
         contentContainerStyle={{
           paddingBottom: Math.max(36, insets.bottom + 20),
         }}
       >
-        {/* 🌟 TOP-TO-MIDDLE: HERO BACKGROUND IMAGE + DARK OVERLAY */}
+        {/* TOP-TO-MIDDLE: HERO BACKGROUND IMAGE + DARK OVERLAY */}
         <ImageBackground
           source={{ uri: HERO_BG_URI }}
           className="w-full"
@@ -1030,15 +1238,19 @@ export default function StrictFocusScreen() {
         >
           <View
             style={{ paddingTop: Math.max(16, insets.top + 8) }}
-            className="bg-[#070B14]/75 px-5 pb-12"
+            className="bg-[#070B14]/80 px-5 pb-12"
           >
             {/* TOP BAR: Left = Pass & Streak Badge | Right = Settings Gear */}
             <View className="flex-row items-center justify-between mb-6">
               <Pressable
                 onPress={() => setPassInfoModalVisible(true)}
-                className="bg-slate-900/85 border border-amber-500/40 px-3.5 py-2 rounded-2xl flex-row items-center"
+                className="bg-slate-900/90 border border-amber-500/40 px-3.5 py-2 rounded-2xl flex-row items-center"
               >
-                <Ionicons name="ticket" size={16} color="#FBBF24" />
+                <MaterialCommunityIcons
+                  name="ticket-confirmation"
+                  size={16}
+                  color="#FBBF24"
+                />
                 <Text
                   allowFontScaling={false}
                   className="text-amber-300 font-black text-xs ml-1.5"
@@ -1046,7 +1258,7 @@ export default function StrictFocusScreen() {
                   Pass: {emergencyPasses}/5
                 </Text>
                 <View className="w-[1px] h-3.5 bg-slate-700 mx-2.5" />
-                <Ionicons name="flame" size={15} color="#34D399" />
+                <MaterialCommunityIcons name="fire" size={16} color="#34D399" />
                 <Text
                   allowFontScaling={false}
                   className="text-emerald-300 font-black text-xs ml-1"
@@ -1057,7 +1269,7 @@ export default function StrictFocusScreen() {
 
               <Pressable
                 onPress={() => setSettingsModalVisible(true)}
-                className="h-11 w-11 rounded-2xl bg-slate-900/85 border border-slate-700 items-center justify-center relative"
+                className="h-11 w-11 rounded-2xl bg-slate-900/90 border border-slate-700 items-center justify-center relative"
               >
                 <Ionicons name="settings-outline" size={22} color="#E2E8F0" />
                 {!allPermsReady && (
@@ -1066,27 +1278,37 @@ export default function StrictFocusScreen() {
               </Pressable>
             </View>
 
-            {/* HERO CENTER: Duration Input + Preset Chips + Glowing HOLD Button */}
+            {/* HERO CENTER: Duration Input (Max 360m / 6h) + Preset Chips + Glowing HOLD Button */}
             <View className="items-center">
               <Text
                 allowFontScaling={false}
                 className="text-indigo-300 font-bold text-xs uppercase tracking-widest mb-2"
               >
-                Deep Focus Session
+                Deep Focus Session (Max 6h)
               </Text>
 
               <View className="flex-row items-baseline justify-center mb-3">
                 <TextInput
                   allowFontScaling={false}
                   value={customDuration}
-                  onChangeText={(text) =>
-                    setCustomDuration(text.replace(/[^0-9]/g, ""))
-                  }
+                  onChangeText={(text) => {
+                    const digits = text.replace(/[^0-9]/g, "");
+                    if (!digits) {
+                      setCustomDuration("");
+                      return;
+                    }
+                    const num = parseInt(digits, 10);
+                    if (num > MAX_SESSION_MINUTES) {
+                      setCustomDuration(String(MAX_SESSION_MINUTES));
+                    } else {
+                      setCustomDuration(digits);
+                    }
+                  }}
                   keyboardType="number-pad"
                   maxLength={3}
                   placeholder="60"
                   placeholderTextColor="#64748B"
-                  className="text-white text-5xl font-black bg-slate-900/80 border border-slate-700/80 rounded-3xl w-36 text-center py-2"
+                  className="text-white text-5xl font-black bg-slate-900/85 border border-slate-700/80 rounded-3xl w-36 text-center py-2"
                 />
                 <Text
                   allowFontScaling={false}
@@ -1096,18 +1318,19 @@ export default function StrictFocusScreen() {
                 </Text>
               </View>
 
-              {/* Preset Duration Pills */}
+              {/* Preset Duration Pills (Up to 6h = 360m) */}
               <View className="flex-row justify-center gap-2 mb-6">
                 {[
                   { label: "30m", val: "30" },
                   { label: "1h", val: "60" },
                   { label: "2h", val: "120" },
                   { label: "4h", val: "240" },
+                  { label: "6h Max", val: "360" },
                 ].map((preset) => (
                   <Pressable
                     key={preset.val}
                     onPress={() => setCustomDuration(preset.val)}
-                    className={`px-4 py-1.5 rounded-full border ${
+                    className={`px-3.5 py-1.5 rounded-full border ${
                       customDuration === preset.val
                         ? "bg-indigo-600 border-indigo-400"
                         : "bg-slate-900/75 border-slate-700"
@@ -1157,9 +1380,9 @@ export default function StrictFocusScreen() {
                       }),
                     }}
                   />
-                  <Ionicons
-                    name="lock-closed"
-                    size={34}
+                  <MaterialCommunityIcons
+                    name="shield-lock"
+                    size={36}
                     color="white"
                     style={{ zIndex: 10 }}
                   />
@@ -1182,50 +1405,59 @@ export default function StrictFocusScreen() {
           </View>
         </ImageBackground>
 
-        {/* 🌟 MIDDLE-TO-BOTTOM: CLEAN CURVED SHEET */}
-        <View className="bg-[#0F172A] rounded-t-[32px] -mt-6 px-5 pt-6">
-          {/* Permission Warning Banner (only if permissions aren't ready) */}
+        {/* MIDDLE-TO-BOTTOM: CLEAN CURVED SHEET */}
+        <View className="bg-[#0B1120] rounded-t-[32px] -mt-6 px-5 pt-6">
+          {/* 🌟 AUTO-HIDE SYSTEM PERMISSIONS BANNER: Only shown when at least 1 permission is missing! */}
           {!allPermsReady && (
             <Pressable
               onPress={() => setSettingsModalVisible(true)}
               className="bg-rose-500/15 border border-rose-500/40 p-3.5 rounded-2xl mb-4 flex-row items-center justify-between"
             >
               <View className="flex-row items-center flex-1 pr-2">
-                <Ionicons name="alert-circle" size={20} color="#F43F5E" />
+                <MaterialCommunityIcons
+                  name="shield-alert-outline"
+                  size={20}
+                  color="#F43F5E"
+                />
                 <Text
                   allowFontScaling={false}
                   className="text-rose-200 font-bold text-xs ml-2 flex-1"
                 >
-                  কড়া লকের জন্য ৩টি সিস্টেম পারমিশন অন করুন
+                  বাকি থাকা {missingPermsCount}টি সিস্টেম পারমিশন অন করুন (অন
+                  করলেই অটো হাইড হবে)
                 </Text>
               </View>
               <Text
                 allowFontScaling={false}
                 className="text-rose-400 font-black text-xs"
               >
-                Setup →
+                Allow →
               </Text>
             </Pressable>
           )}
 
-          {/* CARD 1: 25m Focus + 5m Break Cycle Bar */}
-          <View className="bg-slate-800/90 p-4 rounded-3xl border border-slate-700/80 flex-row items-center justify-between mb-4">
+          {/* CARD 1: Session 25m Lock + 5m Break Cycle Bar */}
+          <View className="bg-[#131C31] p-4 rounded-3xl border border-slate-800 flex-row items-center justify-between mb-4">
             <View className="flex-row items-center flex-1 pr-3">
               <View className="w-10 h-10 rounded-2xl bg-emerald-500/15 border border-emerald-500/30 items-center justify-center mr-3">
-                <Ionicons name="cafe" size={20} color="#34D399" />
+                <MaterialCommunityIcons
+                  name="coffee-outline"
+                  size={20}
+                  color="#34D399"
+                />
               </View>
               <View className="flex-1">
                 <Text
                   allowFontScaling={false}
                   className="text-white font-bold text-sm"
                 >
-                  25m Lock + 5m Break Cycle
+                  Session: 25m Lock + 5m Break
                 </Text>
                 <Text
                   allowFontScaling={false}
                   className="text-slate-400 text-[11px] mt-0.5"
                 >
-                  প্রতি ২৫ মিনিট কড়া লকের পর ৫ মিনিট অটো ফ্রি ব্রেক
+                  প্রতি ২৫ মিনিট পর ৫ মিনিট ব্রেক (Reels/Shorts ব্লক থাকবে)
                 </Text>
               </View>
             </View>
@@ -1237,11 +1469,15 @@ export default function StrictFocusScreen() {
             />
           </View>
 
-          {/* CARD 2: Allowed Apps & Active Rules At a Glance */}
-          <View className="bg-slate-800/90 p-4 rounded-3xl border border-slate-700/80 mb-4">
+          {/* CARD 2: Allowed Apps & Active Rules + Study PDF Launcher */}
+          <View className="bg-[#131C31] p-4 rounded-3xl border border-slate-800 mb-4">
             <View className="flex-row items-center justify-between mb-3">
               <View className="flex-row items-center">
-                <Ionicons name="apps" size={16} color="#818CF8" />
+                <MaterialCommunityIcons
+                  name="apps"
+                  size={18}
+                  color="#818CF8"
+                />
                 <Text
                   allowFontScaling={false}
                   className="text-white font-bold text-xs ml-2"
@@ -1266,7 +1502,7 @@ export default function StrictFocusScreen() {
             {allowedAppObjects.length === 0 ? (
               <Pressable
                 onPress={() => setAppModalVisible(true)}
-                className="bg-slate-900/70 py-3 rounded-2xl items-center border border-slate-700/60 mb-3"
+                className="bg-[#0B1120] py-3 rounded-2xl items-center border border-slate-800 mb-3"
               >
                 <Text
                   allowFontScaling={false}
@@ -1280,7 +1516,7 @@ export default function StrictFocusScreen() {
                 {allowedAppObjects.map((app) => (
                   <View
                     key={app.packageName}
-                    className="bg-slate-900 px-2.5 py-1.5 rounded-xl border border-slate-700 flex-row items-center"
+                    className="bg-[#0B1120] px-2.5 py-1.5 rounded-xl border border-slate-800 flex-row items-center"
                   >
                     {app.icon ? (
                       <Image
@@ -1288,8 +1524,8 @@ export default function StrictFocusScreen() {
                         style={{ width: 18, height: 18, borderRadius: 4 }}
                       />
                     ) : (
-                      <Ionicons
-                        name="apps"
+                      <MaterialCommunityIcons
+                        name="application"
                         size={16}
                         color={getAppColor(app.appName)}
                       />
@@ -1306,11 +1542,11 @@ export default function StrictFocusScreen() {
               </View>
             )}
 
-            {/* Quick Summary Pills for YT & Chrome */}
-            <View className="flex-row gap-2 pt-2 border-t border-slate-700/60">
+            {/* Quick Summary Pills for YT, Chrome & PDF */}
+            <View className="flex-row gap-2 pt-2 border-t border-slate-800">
               <Pressable
                 onPress={() => setSettingsModalVisible(true)}
-                className="flex-1 bg-slate-900/80 py-2 px-3 rounded-xl flex-row items-center justify-between border border-slate-700/60"
+                className="flex-1 bg-[#0B1120] py-2 px-2.5 rounded-xl flex-row items-center justify-between border border-slate-800"
               >
                 <View className="flex-row items-center">
                   <Ionicons name="logo-youtube" size={14} color="#EF4444" />
@@ -1318,36 +1554,61 @@ export default function StrictFocusScreen() {
                     allowFontScaling={false}
                     className="text-slate-300 font-bold text-[11px] ml-1.5"
                   >
-                    YT Limit: {ytLimitMinutes}m
+                    YT: {ytLimitMinutes}m
                   </Text>
                 </View>
-                <Ionicons name="chevron-forward" size={13} color="#64748B" />
+                <Ionicons name="chevron-forward" size={12} color="#64748B" />
               </Pressable>
 
               <Pressable
                 onPress={() => setSettingsModalVisible(true)}
-                className="flex-1 bg-slate-900/80 py-2 px-3 rounded-xl flex-row items-center justify-between border border-slate-700/60"
+                className="flex-1 bg-[#0B1120] py-2 px-2.5 rounded-xl flex-row items-center justify-between border border-slate-800"
               >
                 <View className="flex-row items-center">
-                  <Ionicons name="globe-outline" size={14} color="#38BDF8" />
+                  <MaterialCommunityIcons
+                    name="web"
+                    size={14}
+                    color="#38BDF8"
+                  />
                   <Text
                     allowFontScaling={false}
                     className="text-slate-300 font-bold text-[11px] ml-1.5"
                   >
-                    Chrome: {allowedDomains.length}/{MAX_ALLOWED_DOMAINS} Sites
+                    Sites: {allowedDomains.length}/{MAX_ALLOWED_DOMAINS}
                   </Text>
                 </View>
-                <Ionicons name="chevron-forward" size={13} color="#64748B" />
+                <Ionicons name="chevron-forward" size={12} color="#64748B" />
+              </Pressable>
+
+              <Pressable
+                onPress={() => void handlePickAndReadStudyPdf()}
+                className="bg-sky-500/15 py-2 px-2.5 rounded-xl flex-row items-center border border-sky-500/30"
+              >
+                <MaterialCommunityIcons
+                  name="file-pdf-box"
+                  size={15}
+                  color="#38BDF8"
+                />
+                <Text
+                  allowFontScaling={false}
+                  className="text-sky-300 font-bold text-[11px] ml-1"
+                >
+                  PDF
+                </Text>
               </Pressable>
             </View>
           </View>
 
-          {/* CARD 3: Compact Daily Schedule Lock Card */}
-          <View className="bg-slate-800/90 p-4 rounded-3xl border border-slate-700/80">
+          {/* CARD 3: Daily Schedule Lock Card (With 50m Lock + 10m Break Toggle & Max 10h Cap!) */}
+          <View className="bg-[#131C31] p-4 rounded-3xl border border-slate-800">
             <View className="flex-row items-center justify-between mb-3">
               <View className="flex-row items-center flex-1 pr-2">
                 <View className="w-9 h-9 rounded-2xl bg-indigo-500/15 border border-indigo-500/30 items-center justify-center mr-2.5">
-                  <Ionicons name="alarm-outline" size={18} color="#818CF8" />
+                  <MaterialCommunityIcons
+                    name="calendar-clock"
+                    size={19}
+                    color="#818CF8"
+                  />
                 </View>
                 <View className="flex-1">
                   <Text
@@ -1360,7 +1621,7 @@ export default function StrictFocusScreen() {
                     allowFontScaling={false}
                     className="text-slate-400 text-[11px]"
                   >
-                    প্রতিদিন নির্দিষ্ট সময়ে অটোমেটিক একটানা লক
+                    সর্বোচ্চ ১০ ঘণ্টা সীমা • 50m Lock + 10m Break সাপোর্ট
                   </Text>
                 </View>
               </View>
@@ -1377,43 +1638,75 @@ export default function StrictFocusScreen() {
               </Pressable>
             </View>
 
-            {schedules.slice(0, 2).map((sched, i) => (
-              <View
-                key={sched.id}
-                className="bg-slate-900/80 px-3.5 py-2.5 rounded-2xl border border-slate-700/60 flex-row items-center justify-between mb-2 last:mb-0"
-              >
-                <Pressable
-                  onPress={() => setScheduleModalVisible(true)}
-                  className="flex-1 pr-2"
-                >
-                  <Text
-                    allowFontScaling={false}
-                    className="text-white font-black text-xs"
-                  >
-                    ⏰ {formatTime(sched.startTime)} →{" "}
-                    {formatTime(sched.endTime)}
-                  </Text>
-                  <Text
-                    allowFontScaling={false}
-                    className="text-slate-400 text-[10px] mt-0.5"
-                  >
-                    Schedule {i + 1} • {sched.activeDays.length} days/week
-                  </Text>
-                </Pressable>
-                <Switch
-                  value={sched.isEnabled}
-                  onValueChange={async (val) => {
-                    const updated = schedules.map((s) =>
-                      s.id === sched.id ? { ...s, isEnabled: val } : s,
-                    );
-                    setSchedules(updated);
-                    await saveAllSchedules(updated, false);
-                  }}
-                  trackColor={{ false: "#334155", true: "#818CF8" }}
-                  thumbColor="#FFFFFF"
+            {/* Schedule 50m + 10m Break Toggle inside Card */}
+            <View className="bg-[#0B1120] px-3.5 py-2.5 rounded-2xl border border-slate-800 flex-row items-center justify-between mb-2.5">
+              <View className="flex-row items-center flex-1 pr-2">
+                <MaterialCommunityIcons
+                  name="timer-sand"
+                  size={16}
+                  color="#34D399"
                 />
+                <Text
+                  allowFontScaling={false}
+                  className="text-slate-200 font-bold text-xs ml-2 flex-1"
+                >
+                  Schedule: 50m Lock + 10m Break
+                </Text>
               </View>
-            ))}
+              <Switch
+                value={scheduleBreakEnabled}
+                onValueChange={(v) => void toggleScheduleBreak(v)}
+                trackColor={{ false: "#334155", true: "#10B981" }}
+                thumbColor="#FFFFFF"
+              />
+            </View>
+
+            {schedules.slice(0, 2).map((sched, i) => {
+              const durHours = (
+                getScheduleDurationMinutes(sched.startTime, sched.endTime) / 60
+              ).toFixed(1);
+              return (
+                <View
+                  key={sched.id}
+                  className="bg-[#0B1120] px-3.5 py-2.5 rounded-2xl border border-slate-800 flex-row items-center justify-between mb-2 last:mb-0"
+                >
+                  <Pressable
+                    onPress={() => setScheduleModalVisible(true)}
+                    className="flex-1 pr-2"
+                  >
+                    <View className="flex-row items-center">
+                      <Feather name="clock" size={12} color="#818CF8" />
+                      <Text
+                        allowFontScaling={false}
+                        className="text-white font-black text-xs ml-1.5"
+                      >
+                        {formatTime(sched.startTime)} →{" "}
+                        {formatTime(sched.endTime)}
+                      </Text>
+                    </View>
+                    <Text
+                      allowFontScaling={false}
+                      className="text-slate-400 text-[10px] mt-0.5"
+                    >
+                      Schedule {i + 1} ({durHours}h / Max 10h) •{" "}
+                      {sched.activeDays.length}d/wk
+                    </Text>
+                  </Pressable>
+                  <Switch
+                    value={sched.isEnabled}
+                    onValueChange={async (val) => {
+                      const updated = schedules.map((s) =>
+                        s.id === sched.id ? { ...s, isEnabled: val } : s,
+                      );
+                      setSchedules(updated);
+                      await saveAllSchedules(updated, false);
+                    }}
+                    trackColor={{ false: "#334155", true: "#818CF8" }}
+                    thumbColor="#FFFFFF"
+                  />
+                </View>
+              );
+            })}
           </View>
         </View>
       </ScrollView>
@@ -1426,7 +1719,11 @@ export default function StrictFocusScreen() {
           <View className="bg-slate-900 w-full rounded-3xl p-5 border border-slate-700">
             <View className="flex-row items-center justify-between mb-4">
               <View className="flex-row items-center">
-                <Ionicons name="ticket" size={22} color="#FBBF24" />
+                <MaterialCommunityIcons
+                  name="ticket-confirmation"
+                  size={22}
+                  color="#FBBF24"
+                />
                 <Text
                   allowFontScaling={false}
                   className="text-white font-black text-lg ml-2"
@@ -1444,12 +1741,19 @@ export default function StrictFocusScreen() {
 
             <View className="bg-slate-800 p-4 rounded-2xl border border-slate-700 mb-3">
               <View className="flex-row justify-between items-center mb-2">
-                <Text
-                  allowFontScaling={false}
-                  className="text-slate-300 font-bold text-xs"
-                >
-                  🎟️ বর্তমান জমানো পাস
-                </Text>
+                <View className="flex-row items-center">
+                  <MaterialCommunityIcons
+                    name="ticket-confirmation-outline"
+                    size={16}
+                    color="#FBBF24"
+                  />
+                  <Text
+                    allowFontScaling={false}
+                    className="text-slate-300 font-bold text-xs ml-1.5"
+                  >
+                    বর্তমান জমানো পাস
+                  </Text>
+                </View>
                 <Text
                   allowFontScaling={false}
                   className="text-amber-400 font-black text-base"
@@ -1471,12 +1775,19 @@ export default function StrictFocusScreen() {
 
             <View className="bg-slate-800 p-4 rounded-2xl border border-slate-700 mb-4">
               <View className="flex-row justify-between items-center mb-2">
-                <Text
-                  allowFontScaling={false}
-                  className="text-slate-300 font-bold text-xs"
-                >
-                  🔥 পরবর্তী পাসের স্ট্রিক অগ্রগতি
-                </Text>
+                <View className="flex-row items-center">
+                  <MaterialCommunityIcons
+                    name="fire"
+                    size={16}
+                    color="#34D399"
+                  />
+                  <Text
+                    allowFontScaling={false}
+                    className="text-slate-300 font-bold text-xs ml-1.5"
+                  >
+                    পরবর্তী পাসের স্ট্রিক অগ্রগতি
+                  </Text>
+                </View>
                 <Text
                   allowFontScaling={false}
                   className="text-emerald-400 font-black text-base"
@@ -1502,8 +1813,9 @@ export default function StrictFocusScreen() {
             >
               • প্রতিদিন কমপক্ষে ৩০ মিনিটের লক সফলভাবে পূর্ণ করলে ১ স্ট্রিক যোগ
               হয় (দিনে সর্বোচ্চ ১টি)।{"\n"}• টানা ৩ দিন পূর্ণ করলে পুরস্কার
-              হিসেবে +1 Emergency Pass পাবেন (সর্বোচ্চ ৫টি)।{"\n"}• জরুরি
-              প্রয়োজনে পাস ব্যবহার করে লক ভাঙলে ১টি পাস কাটা যাবে।
+              হিসেবে +1 Emergency Pass পাবেন (সর্বোচ্চ ৫টি)।{"\n"}• প্রোফাইল
+              স্ক্রিনে গত ২ মাসের (৬০ দিনের) GitHub Green Streak গ্রাফ দেখতে
+              পাবেন।
             </Text>
 
             <Pressable
@@ -1522,7 +1834,7 @@ export default function StrictFocusScreen() {
       </Modal>
 
       {/* ===================================================================== */}
-      {/* MODAL 2: TOP-RIGHT ⚙️ SETTINGS MODAL (Permissions, YT Quota, Chrome)  */}
+      {/* MODAL 2: TOP-RIGHT SETTINGS MODAL (Auto-hides granted permissions + Keyboard-safe!) */}
       {/* ===================================================================== */}
       <Modal
         visible={settingsModalVisible}
@@ -1531,12 +1843,17 @@ export default function StrictFocusScreen() {
         onRequestClose={() => setSettingsModalVisible(false)}
       >
         <KeyboardAvoidingView
-          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          behavior={Platform.OS === "ios" ? "padding" : "height"}
           className="flex-1 bg-black/80 justify-end"
         >
           <View
-            style={{ paddingBottom: Math.max(20, insets.bottom + 12) }}
-            className="bg-slate-900 w-full rounded-t-[32px] px-5 pt-5 border-t border-slate-700 max-h-[90%]"
+            style={{
+              paddingBottom:
+                keyboardHeight > 0
+                  ? keyboardHeight + 16
+                  : Math.max(20, insets.bottom + 12),
+            }}
+            className="bg-slate-900 w-full rounded-t-[32px] px-5 pt-5 border-t border-slate-700 max-h-[92%]"
           >
             <View className="flex-row items-center justify-between mb-4">
               <View className="flex-row items-center">
@@ -1556,109 +1873,114 @@ export default function StrictFocusScreen() {
               </Pressable>
             </View>
 
-            <ScrollView showsVerticalScrollIndicator={false}>
-              {/* 1. System Permissions */}
-              <Text
-                allowFontScaling={false}
-                className="text-slate-400 font-bold text-xs uppercase mb-2"
-              >
-                ১. সিস্টেম পারমিশন (3 Required)
-              </Text>
-              <View className="bg-slate-800 p-3.5 rounded-2xl border border-slate-700 mb-4 gap-y-2">
-                <Pressable
-                  onPress={() => void FocusLock?.openOverlaySettings?.()}
-                  className="flex-row items-center justify-between bg-slate-900 p-3 rounded-xl border border-slate-700"
-                >
-                  <View className="flex-row items-center flex-1 pr-2">
-                    <Ionicons
-                      name={
-                        permState.overlay
-                          ? "checkmark-circle"
-                          : "layers-outline"
-                      }
-                      size={18}
-                      color={permState.overlay ? "#34D399" : "#F87171"}
-                    />
-                    <Text
-                      allowFontScaling={false}
-                      className="text-white font-bold text-xs ml-2 flex-1"
-                    >
-                      Display Over Other Apps (0ms Pull-Back)
-                    </Text>
-                  </View>
+            <ScrollView
+              showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
+            >
+              {/* 🌟 1. System Permissions: Each row auto-hides once granted; entire block hides when all 3 are granted! */}
+              {!allPermsReady && (
+                <>
                   <Text
                     allowFontScaling={false}
-                    className={`text-xs font-bold ${permState.overlay ? "text-emerald-400" : "text-indigo-400"}`}
+                    className="text-rose-400 font-bold text-xs uppercase mb-2"
                   >
-                    {permState.overlay ? "Ready ✅" : "Allow →"}
+                    সিস্টেম পারমিশন বাকি আছে ({missingPermsCount}টি)
                   </Text>
-                </Pressable>
+                  <View className="bg-slate-800 p-3.5 rounded-2xl border border-rose-500/30 mb-4 gap-y-2">
+                    {!permState.overlay && (
+                      <Pressable
+                        onPress={() => void FocusLock?.openOverlaySettings?.()}
+                        className="flex-row items-center justify-between bg-slate-900 p-3 rounded-xl border border-slate-700"
+                      >
+                        <View className="flex-row items-center flex-1 pr-2">
+                          <Ionicons
+                            name="layers-outline"
+                            size={18}
+                            color="#F87171"
+                          />
+                          <Text
+                            allowFontScaling={false}
+                            className="text-white font-bold text-xs ml-2 flex-1"
+                          >
+                            Display Over Other Apps (0ms Pull-Back)
+                          </Text>
+                        </View>
+                        <Text
+                          allowFontScaling={false}
+                          className="text-xs font-bold text-indigo-400"
+                        >
+                          Allow →
+                        </Text>
+                      </Pressable>
+                    )}
 
-                <Pressable
-                  onPress={() => void FocusLock?.openAccessibilitySettings()}
-                  className="flex-row items-center justify-between bg-slate-900 p-3 rounded-xl border border-slate-700"
-                >
-                  <View className="flex-row items-center flex-1 pr-2">
-                    <Ionicons
-                      name={
-                        permState.accessibility
-                          ? "checkmark-circle"
-                          : "eye-outline"
-                      }
-                      size={18}
-                      color={permState.accessibility ? "#34D399" : "#F87171"}
-                    />
-                    <Text
-                      allowFontScaling={false}
-                      className="text-white font-bold text-xs ml-2 flex-1"
-                    >
-                      Accessibility Service (Shorts & PiP Blocker)
-                    </Text>
-                  </View>
-                  <Text
-                    allowFontScaling={false}
-                    className={`text-xs font-bold ${permState.accessibility ? "text-emerald-400" : "text-indigo-400"}`}
-                  >
-                    {permState.accessibility ? "Ready ✅" : "Allow →"}
-                  </Text>
-                </Pressable>
+                    {!permState.accessibility && (
+                      <Pressable
+                        onPress={() =>
+                          void FocusLock?.openAccessibilitySettings()
+                        }
+                        className="flex-row items-center justify-between bg-slate-900 p-3 rounded-xl border border-slate-700"
+                      >
+                        <View className="flex-row items-center flex-1 pr-2">
+                          <Ionicons
+                            name="eye-outline"
+                            size={18}
+                            color="#F87171"
+                          />
+                          <Text
+                            allowFontScaling={false}
+                            className="text-white font-bold text-xs ml-2 flex-1"
+                          >
+                            Accessibility Service (Reels & Shorts Blocker)
+                          </Text>
+                        </View>
+                        <Text
+                          allowFontScaling={false}
+                          className="text-xs font-bold text-indigo-400"
+                        >
+                          Allow →
+                        </Text>
+                      </Pressable>
+                    )}
 
-                <Pressable
-                  onPress={() => void FocusLock?.openDeviceAdminSettings?.()}
-                  className="flex-row items-center justify-between bg-slate-900 p-3 rounded-xl border border-slate-700"
-                >
-                  <View className="flex-row items-center flex-1 pr-2">
-                    <Ionicons
-                      name={
-                        permState.deviceAdmin
-                          ? "checkmark-circle"
-                          : "shield-outline"
-                      }
-                      size={18}
-                      color={permState.deviceAdmin ? "#34D399" : "#FBBF24"}
-                    />
-                    <Text
-                      allowFontScaling={false}
-                      className="text-white font-bold text-xs ml-2 flex-1"
-                    >
-                      Device Administrator (Uninstall Lock)
-                    </Text>
+                    {!permState.deviceAdmin && (
+                      <Pressable
+                        onPress={() =>
+                          void FocusLock?.openDeviceAdminSettings?.()
+                        }
+                        className="flex-row items-center justify-between bg-slate-900 p-3 rounded-xl border border-slate-700"
+                      >
+                        <View className="flex-row items-center flex-1 pr-2">
+                          <Ionicons
+                            name="shield-outline"
+                            size={18}
+                            color="#FBBF24"
+                          />
+                          <Text
+                            allowFontScaling={false}
+                            className="text-white font-bold text-xs ml-2 flex-1"
+                          >
+                            Device Administrator (Uninstall Lock)
+                          </Text>
+                        </View>
+                        <Text
+                          allowFontScaling={false}
+                          className="text-xs font-bold text-indigo-400"
+                        >
+                          Activate →
+                        </Text>
+                      </Pressable>
+                    )}
                   </View>
-                  <Text
-                    allowFontScaling={false}
-                    className={`text-xs font-bold ${permState.deviceAdmin ? "text-emerald-400" : "text-indigo-400"}`}
-                  >
-                    {permState.deviceAdmin ? "Ready ✅" : "Activate →"}
-                  </Text>
-                </Pressable>
-              </View>
+                </>
+              )}
 
               {/* 2. YouTube Long Video Daily Quota */}
               <Text
                 allowFontScaling={false}
                 className="text-slate-400 font-bold text-xs uppercase mb-2"
               >
-                ২. YouTube লং ভিডিও লিমিট (Shorts ও PiP অটো ব্লক)
+                YouTube লং ভিডিও লিমিট (Shorts ও PiP অটো ব্লক)
               </Text>
               <View className="bg-slate-800 p-3.5 rounded-2xl border border-slate-700 mb-4">
                 <View className="flex-row gap-2">
@@ -1692,12 +2014,12 @@ export default function StrictFocusScreen() {
                 </View>
               </View>
 
-              {/* 3. Chrome Allowed Websites (Max 5 Sites, No YouTube) */}
+              {/* 3. Chrome Allowed Websites (Max 5 Sites, No YouTube, Keyboard-Safe!) */}
               <Text
                 allowFontScaling={false}
                 className="text-slate-400 font-bold text-xs uppercase mb-2"
               >
-                ৩. Chrome অনুমোদিত ওয়েবসাইট ({allowedDomains.length}/
+                Chrome অনুমোদিত ওয়েবসাইট ({allowedDomains.length}/
                 {MAX_ALLOWED_DOMAINS} Max • YouTube নিষিদ্ধ)
               </Text>
               <View className="bg-slate-800 p-3.5 rounded-2xl border border-slate-700 mb-4">
@@ -1708,6 +2030,8 @@ export default function StrictFocusScreen() {
                     value={newDomainInput}
                     onChangeText={setNewDomainInput}
                     autoCapitalize="none"
+                    returnKeyType="done"
+                    onSubmitEditing={() => void addDomain()}
                     className="flex-1 bg-slate-900 text-white px-3.5 py-2.5 rounded-xl border border-slate-700 text-xs"
                   />
                   <Pressable
@@ -1728,19 +2052,22 @@ export default function StrictFocusScreen() {
                     key={dom}
                     className="flex-row items-center justify-between bg-slate-900 px-3.5 py-2.5 rounded-xl mb-1.5 border border-slate-700/70"
                   >
-                    <Text
-                      allowFontScaling={false}
-                      numberOfLines={1}
-                      className="text-white font-medium text-xs flex-1 pr-2"
-                    >
-                      🌐 {dom}
-                    </Text>
-                    <Pressable onPress={() => void removeDomain(dom)}>
-                      <Ionicons
-                        name="trash-outline"
-                        size={16}
-                        color="#F43F5E"
+                    <View className="flex-row items-center flex-1 pr-2">
+                      <MaterialCommunityIcons
+                        name="web"
+                        size={15}
+                        color="#38BDF8"
                       />
+                      <Text
+                        allowFontScaling={false}
+                        numberOfLines={1}
+                        className="text-white font-medium text-xs ml-2 flex-1"
+                      >
+                        {dom}
+                      </Text>
+                    </View>
+                    <Pressable onPress={() => void removeDomain(dom)}>
+                      <Feather name="trash-2" size={15} color="#F43F5E" />
                     </Pressable>
                   </View>
                 ))}
@@ -1751,7 +2078,7 @@ export default function StrictFocusScreen() {
       </Modal>
 
       {/* ===================================================================== */}
-      {/* MODAL 3: DAILY SCHEDULE LOCK MANAGER MODAL                            */}
+      {/* MODAL 3: DAILY SCHEDULE LOCK MANAGER MODAL (Max 10h + 50m/10m Break)  */}
       {/* ===================================================================== */}
       <Modal
         visible={scheduleModalVisible}
@@ -1764,13 +2091,21 @@ export default function StrictFocusScreen() {
             style={{ paddingBottom: Math.max(20, insets.bottom + 12) }}
             className="bg-slate-900 w-full rounded-t-[32px] px-5 pt-5 border-t border-slate-700 max-h-[88%]"
           >
-            <View className="flex-row items-center justify-between mb-4">
-              <Text
-                allowFontScaling={false}
-                className="text-white font-black text-lg"
-              >
-                Daily Schedule Lock ({schedules.length}/4)
-              </Text>
+            <View className="flex-row items-center justify-between mb-3">
+              <View>
+                <Text
+                  allowFontScaling={false}
+                  className="text-white font-black text-lg"
+                >
+                  Daily Schedule Lock ({schedules.length}/4)
+                </Text>
+                <Text
+                  allowFontScaling={false}
+                  className="text-slate-400 text-[11px]"
+                >
+                  প্রতিটি শিডিউল সর্বোচ্চ ১০ ঘণ্টা (৬০০ মিনিট) পর্যন্ত সেট করা যাবে
+                </Text>
+              </View>
               <View className="flex-row items-center gap-2">
                 {schedules.length < 4 && (
                   <Pressable
@@ -1805,134 +2140,187 @@ export default function StrictFocusScreen() {
               </View>
             </View>
 
+            {/* 50m Focus + 10m Break Toggle inside Modal */}
+            <View className="bg-slate-800 p-3.5 rounded-2xl border border-slate-700 flex-row items-center justify-between mb-3">
+              <View className="flex-row items-center flex-1 pr-2">
+                <MaterialCommunityIcons
+                  name="coffee-outline"
+                  size={18}
+                  color="#34D399"
+                />
+                <View className="ml-2.5 flex-1">
+                  <Text
+                    allowFontScaling={false}
+                    className="text-white font-bold text-xs"
+                  >
+                    50m Lock + 10m Break Cycle
+                  </Text>
+                  <Text
+                    allowFontScaling={false}
+                    className="text-slate-400 text-[10px]"
+                  >
+                    শিডিউল লকে প্রতি ৫০ মিনিট পর ১০ মিনিট ফ্রি ব্রেক (Reels ব্লকড)
+                  </Text>
+                </View>
+              </View>
+              <Switch
+                value={scheduleBreakEnabled}
+                onValueChange={(v) => void toggleScheduleBreak(v)}
+                trackColor={{ false: "#334155", true: "#10B981" }}
+                thumbColor="#FFFFFF"
+              />
+            </View>
+
             <ScrollView showsVerticalScrollIndicator={false} className="mb-3">
-              {schedules.map((schedule, index) => (
-                <View
-                  key={schedule.id}
-                  className="bg-slate-800 p-4 rounded-3xl border border-slate-700 mb-3"
-                >
-                  <View className="flex-row items-center justify-between mb-3">
-                    <Text
-                      allowFontScaling={false}
-                      className="text-white font-bold text-sm"
-                    >
-                      Schedule {index + 1}
-                    </Text>
-                    <Switch
-                      value={schedule.isEnabled}
-                      onValueChange={async (val) => {
-                        const updated = schedules.map((s) =>
-                          s.id === schedule.id ? { ...s, isEnabled: val } : s,
-                        );
-                        setSchedules(updated);
-                        await saveAllSchedules(updated, false);
-                      }}
-                      trackColor={{ false: "#334155", true: "#818CF8" }}
-                      thumbColor="#FFFFFF"
-                    />
-                  </View>
-
-                  <View className="bg-slate-900/70 p-3 rounded-2xl border border-slate-700/50 mb-3 flex-row items-center justify-between">
-                    <Pressable
-                      onPress={() => {
-                        setEditingSchedule({ id: schedule.id, type: "start" });
-                        setShowPicker(true);
-                      }}
-                      className="items-center flex-1"
-                    >
-                      <Text
-                        allowFontScaling={false}
-                        className="text-slate-500 text-[10px] font-bold uppercase"
-                      >
-                        শুরু হবে
-                      </Text>
-                      <Text
-                        allowFontScaling={false}
-                        className="text-indigo-400 font-black text-base mt-0.5"
-                      >
-                        {formatTime(schedule.startTime)}
-                      </Text>
-                    </Pressable>
-                    <Ionicons name="arrow-forward" size={16} color="#475569" />
-                    <Pressable
-                      onPress={() => {
-                        setEditingSchedule({ id: schedule.id, type: "end" });
-                        setShowPicker(true);
-                      }}
-                      className="items-center flex-1"
-                    >
-                      <Text
-                        allowFontScaling={false}
-                        className="text-slate-500 text-[10px] font-bold uppercase"
-                      >
-                        শেষ হবে
-                      </Text>
-                      <Text
-                        allowFontScaling={false}
-                        className="text-rose-400 font-black text-base mt-0.5"
-                      >
-                        {formatTime(schedule.endTime)}
-                      </Text>
-                    </Pressable>
-                  </View>
-
-                  <View className="flex-row justify-between">
-                    {DAYS.map((day) => {
-                      const isActive = schedule.activeDays.includes(day.id);
-                      return (
-                        <Pressable
-                          key={day.id}
-                          onPress={async () => {
-                            const updated = schedules.map((s) => {
-                              if (s.id !== schedule.id) return s;
-                              const newDays = s.activeDays.includes(day.id)
-                                ? s.activeDays.filter((d) => d !== day.id)
-                                : [...s.activeDays, day.id];
-                              return { ...s, activeDays: newDays };
-                            });
-                            setSchedules(updated);
-                            await saveAllSchedules(updated, true);
-                          }}
-                          className={`w-8 h-8 rounded-full items-center justify-center border ${
-                            isActive
-                              ? "bg-indigo-500 border-indigo-400"
-                              : "bg-slate-900 border-slate-700"
+              {schedules.map((schedule, index) => {
+                const durMins = getScheduleDurationMinutes(
+                  schedule.startTime,
+                  schedule.endTime,
+                );
+                const isOverLimit = durMins > MAX_SCHEDULE_MINUTES;
+                return (
+                  <View
+                    key={schedule.id}
+                    className={`bg-slate-800 p-4 rounded-3xl border mb-3 ${
+                      isOverLimit ? "border-rose-500" : "border-slate-700"
+                    }`}
+                  >
+                    <View className="flex-row items-center justify-between mb-3">
+                      <View>
+                        <Text
+                          allowFontScaling={false}
+                          className="text-white font-bold text-sm"
+                        >
+                          Schedule {index + 1}
+                        </Text>
+                        <Text
+                          allowFontScaling={false}
+                          className={`text-[10px] font-bold ${
+                            isOverLimit ? "text-rose-400" : "text-emerald-400"
                           }`}
                         >
-                          <Text
-                            allowFontScaling={false}
-                            className={`font-bold text-[11px] ${isActive ? "text-white" : "text-slate-500"}`}
-                          >
-                            {day.label}
-                          </Text>
-                        </Pressable>
-                      );
-                    })}
-                  </View>
-
-                  {schedules.length > 1 && (
-                    <Pressable
-                      onPress={async () => {
-                        const updated = schedules.filter(
-                          (s) => s.id !== schedule.id,
-                        );
-                        setSchedules(updated);
-                        await saveAllSchedules(updated, true);
-                      }}
-                      className="mt-3 pt-2 border-t border-slate-700/50 flex-row justify-center items-center"
-                    >
-                      <Ionicons
-                        name="trash-outline"
-                        size={14}
-                        color="#EF4444"
+                          সময়কাল: {(durMins / 60).toFixed(1)} ঘণ্টা (Max 10h)
+                        </Text>
+                      </View>
+                      <Switch
+                        value={schedule.isEnabled}
+                        onValueChange={async (val) => {
+                          const updated = schedules.map((s) =>
+                            s.id === schedule.id ? { ...s, isEnabled: val } : s,
+                          );
+                          setSchedules(updated);
+                          await saveAllSchedules(updated, false);
+                        }}
+                        trackColor={{ false: "#334155", true: "#818CF8" }}
+                        thumbColor="#FFFFFF"
                       />
-                      <Text className="text-rose-500 font-bold text-xs ml-1">
-                        মুছে ফেলুন
-                      </Text>
-                    </Pressable>
-                  )}
-                </View>
-              ))}
+                    </View>
+
+                    <View className="bg-slate-900/70 p-3 rounded-2xl border border-slate-700/50 mb-3 flex-row items-center justify-between">
+                      <Pressable
+                        onPress={() => {
+                          setEditingSchedule({
+                            id: schedule.id,
+                            type: "start",
+                          });
+                          setShowPicker(true);
+                        }}
+                        className="items-center flex-1"
+                      >
+                        <Text
+                          allowFontScaling={false}
+                          className="text-slate-500 text-[10px] font-bold uppercase"
+                        >
+                          শুরু হবে
+                        </Text>
+                        <Text
+                          allowFontScaling={false}
+                          className="text-indigo-400 font-black text-base mt-0.5"
+                        >
+                          {formatTime(schedule.startTime)}
+                        </Text>
+                      </Pressable>
+                      <Ionicons
+                        name="arrow-forward"
+                        size={16}
+                        color="#475569"
+                      />
+                      <Pressable
+                        onPress={() => {
+                          setEditingSchedule({ id: schedule.id, type: "end" });
+                          setShowPicker(true);
+                        }}
+                        className="items-center flex-1"
+                      >
+                        <Text
+                          allowFontScaling={false}
+                          className="text-slate-500 text-[10px] font-bold uppercase"
+                        >
+                          শেষ হবে
+                        </Text>
+                        <Text
+                          allowFontScaling={false}
+                          className="text-rose-400 font-black text-base mt-0.5"
+                        >
+                          {formatTime(schedule.endTime)}
+                        </Text>
+                      </Pressable>
+                    </View>
+
+                    <View className="flex-row justify-between">
+                      {DAYS.map((day) => {
+                        const isActive = schedule.activeDays.includes(day.id);
+                        return (
+                          <Pressable
+                            key={day.id}
+                            onPress={async () => {
+                              const updated = schedules.map((s) => {
+                                if (s.id !== schedule.id) return s;
+                                const newDays = s.activeDays.includes(day.id)
+                                  ? s.activeDays.filter((d) => d !== day.id)
+                                  : [...s.activeDays, day.id];
+                                return { ...s, activeDays: newDays };
+                              });
+                              setSchedules(updated);
+                              await saveAllSchedules(updated, true);
+                            }}
+                            className={`w-8 h-8 rounded-full items-center justify-center border ${
+                              isActive
+                                ? "bg-indigo-500 border-indigo-400"
+                                : "bg-slate-900 border-slate-700"
+                            }`}
+                          >
+                            <Text
+                              allowFontScaling={false}
+                              className={`font-bold text-[11px] ${isActive ? "text-white" : "text-slate-500"}`}
+                            >
+                              {day.label}
+                            </Text>
+                          </Pressable>
+                        );
+                      })}
+                    </View>
+
+                    {schedules.length > 1 && (
+                      <Pressable
+                        onPress={async () => {
+                          const updated = schedules.filter(
+                            (s) => s.id !== schedule.id,
+                          );
+                          setSchedules(updated);
+                          await saveAllSchedules(updated, true);
+                        }}
+                        className="mt-3 pt-2 border-t border-slate-700/50 flex-row justify-center items-center"
+                      >
+                        <Feather name="trash-2" size={13} color="#EF4444" />
+                        <Text className="text-rose-500 font-bold text-xs ml-1.5">
+                          মুছে ফেলুন
+                        </Text>
+                      </Pressable>
+                    )}
+                  </View>
+                );
+              })}
             </ScrollView>
 
             <Pressable
@@ -1954,13 +2342,21 @@ export default function StrictFocusScreen() {
       </Modal>
 
       {/* ===================================================================== */}
-      {/* MODAL 4: APP PICKER MODAL (MAX 6 APPS)                                */}
+      {/* MODAL 4: APP PICKER MODAL (MAX 6 APPS + Keyboard-Safe!)               */}
       {/* ===================================================================== */}
       <Modal visible={appModalVisible} transparent animationType="slide">
-        <View className="flex-1 bg-black/75 justify-end">
+        <KeyboardAvoidingView
+          behavior={Platform.OS === "ios" ? "padding" : "height"}
+          className="flex-1 bg-black/75 justify-end"
+        >
           <View
-            style={{ paddingBottom: Math.max(20, insets.bottom + 12) }}
-            className="bg-slate-900 w-full rounded-t-[28px] px-5 pt-5 border-t border-slate-700 max-h-[85%]"
+            style={{
+              paddingBottom:
+                keyboardHeight > 0
+                  ? keyboardHeight + 14
+                  : Math.max(20, insets.bottom + 12),
+            }}
+            className="bg-slate-900 w-full rounded-t-[28px] px-5 pt-5 border-t border-slate-700 max-h-[88%]"
           >
             <View className="flex-row justify-between items-center mb-3">
               <View className="flex-1 pr-2">
@@ -2001,7 +2397,11 @@ export default function StrictFocusScreen() {
                 <ActivityIndicator size="large" color="#818CF8" />
               </View>
             ) : (
-              <ScrollView showsVerticalScrollIndicator={false} className="mb-3">
+              <ScrollView
+                showsVerticalScrollIndicator={false}
+                keyboardShouldPersistTaps="handled"
+                className="mb-3"
+              >
                 {filteredApps.map((app) => {
                   const isChecked = selectedApps.includes(app.packageName);
                   return (
@@ -2021,8 +2421,8 @@ export default function StrictFocusScreen() {
                             style={{ width: 26, height: 26, borderRadius: 6 }}
                           />
                         ) : (
-                          <Ionicons
-                            name="apps"
+                          <MaterialCommunityIcons
+                            name="application"
                             size={26}
                             color={getAppColor(app.appName)}
                           />
@@ -2060,7 +2460,7 @@ export default function StrictFocusScreen() {
               </Text>
             </Pressable>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       {showPicker && editingSchedule && (
@@ -2078,6 +2478,23 @@ export default function StrictFocusScreen() {
           onChange={async (_event, date) => {
             if (Platform.OS === "android") setShowPicker(false);
             if (date && editingSchedule) {
+              const target = schedules.find((s) => s.id === editingSchedule.id);
+              if (target) {
+                const nextStart =
+                  editingSchedule.type === "start" ? date : target.startTime;
+                const nextEnd =
+                  editingSchedule.type === "end" ? date : target.endTime;
+                const durMins = getScheduleDurationMinutes(nextStart, nextEnd);
+                if (durMins > MAX_SCHEDULE_MINUTES) {
+                  Alert.alert(
+                    "সর্বোচ্চ ১০ ঘণ্টার সীমা (Schedule Limit)",
+                    `আপনি ${(durMins / 60).toFixed(1)} ঘণ্টার ব্যবধান দিয়েছেন। নিরাপত্তার জন্য Schedule Lock একটানা সর্বোচ্চ ১০ ঘণ্টার (৬০০ মিনিট) বেশি সেট করা যাবে না।`,
+                  );
+                  setEditingSchedule(null);
+                  return;
+                }
+              }
+
               const updated = schedules.map((s) =>
                 s.id === editingSchedule.id
                   ? {

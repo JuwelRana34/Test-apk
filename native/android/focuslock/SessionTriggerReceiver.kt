@@ -54,15 +54,18 @@ class SessionTriggerReceiver : BroadcastReceiver() {
 
                 val now = System.currentTimeMillis()
                 val nowRealtime = SystemClock.elapsedRealtime()
-                val plannedDuration = (endCalendar.timeInMillis - now).coerceAtLeast(0L)
+                // 🌟 Cap Schedule Lock duration at max 10 hours so phone never gets locked for 24h!
+                val rawDuration = (endCalendar.timeInMillis - now).coerceAtLeast(60_000L)
+                val safeDuration = rawDuration.coerceAtMost(FocusScheduler.MAX_SCHEDULE_DURATION_MILLIS)
+                val safeEndTime = now + safeDuration
 
                 prefs.edit()
                     .putBoolean("IS_SESSION_ACTIVE", true)
                     .putString("LOCK_MODE", lockMode)
                     .putLong("SESSION_START_TIME", now)
                     .putLong("SESSION_START_REALTIME", nowRealtime)
-                    .putLong("SESSION_END_TIME", endCalendar.timeInMillis)
-                    .putLong("SESSION_PLANNED_DURATION", plannedDuration)
+                    .putLong("SESSION_END_TIME", safeEndTime)
+                    .putLong("SESSION_PLANNED_DURATION", safeDuration)
                     .commit()
 
                 FocusScheduler.scheduleAlarms(context)
@@ -97,8 +100,8 @@ class SessionTriggerReceiver : BroadcastReceiver() {
 
                 val notification = NotificationCompat.Builder(context, CHANNEL_ID)
                     .setSmallIcon(android.R.drawable.ic_lock_lock)
-                    .setContentTitle("Strict Schedule Lock Active 🔒")
-                    .setContentText("Your scheduled lock has started automatically.")
+                    .setContentTitle("Schedule Lock (50m/10m) Active")
+                    .setContentText("Your scheduled focus lock has started automatically.")
                     .setPriority(NotificationCompat.PRIORITY_MAX)
                     .setCategory(NotificationCompat.CATEGORY_ALARM)
                     .setFullScreenIntent(fullScreenIntent, true)

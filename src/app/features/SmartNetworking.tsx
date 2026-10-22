@@ -1,4 +1,4 @@
-import { Ionicons } from "@expo/vector-icons";
+import { Feather, Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { StatusBar } from "expo-status-bar";
 import React, {
@@ -13,6 +13,7 @@ import {
   Alert,
   AppState,
   FlatList,
+  Keyboard,
   KeyboardAvoidingView,
   Linking,
   Modal,
@@ -206,6 +207,7 @@ export default function SmartNetworkingScreen() {
   const [selectedContactToAdd, setSelectedContactToAdd] =
     useState<PhonebookContact | null>(null);
   const [customNoteInput, setCustomNoteInput] = useState("");
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
 
   const [appStats, setAppStats] = useState<AppStats>({
     currentStreak: 0,
@@ -215,6 +217,20 @@ export default function SmartNetworkingScreen() {
 
   const pendingCallContactIdRef = useRef<string | null>(null);
   const appState = useRef(AppState.currentState);
+
+  // Track keyboard height so note input and search input are never hidden!
+  useEffect(() => {
+    const showSub = Keyboard.addListener("keyboardDidShow", (e) => {
+      setKeyboardHeight(e.endCoordinates?.height || 0);
+    });
+    const hideSub = Keyboard.addListener("keyboardDidHide", () => {
+      setKeyboardHeight(0);
+    });
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
 
   const loadContactsAndScheduleNotifications = useCallback(async () => {
     try {
@@ -348,7 +364,7 @@ export default function SmartNetworkingScreen() {
     if (type === "done") {
       await markContactAsSpoken(contact.id);
       Alert.alert(
-        "সম্পন্ন হয়েছে ✅",
+        "সম্পন্ন হয়েছে",
         `${contact.name}-এর সাথে যোগাযোগ রেকর্ড করা হয়েছে। পরবর্তী রিমাইন্ডার নতুন একটি র‍্যান্ডম তারিখে সন্ধ্যা ৭টায় সেট হয়ে গেছে!`,
       );
       return;
@@ -502,12 +518,12 @@ export default function SmartNetworkingScreen() {
 
   return (
     <SafeAreaView
-      className="flex-1 bg-[#0F172A]"
+      className="flex-1 bg-[#0B1120]"
       edges={["top", "bottom", "left", "right"]}
     >
       <StatusBar style="light" />
 
-      {/* HEADER (Overflow-Proof) */}
+      {/* HEADER */}
       <View className="px-4 pt-3 pb-1">
         <View className="flex-row justify-between items-center mb-1">
           <View className="flex-1 pr-2">
@@ -544,7 +560,11 @@ export default function SmartNetworkingScreen() {
               }}
               className="bg-emerald-600/20 border border-emerald-500/40 h-10 px-2.5 items-center justify-center rounded-xl flex-row"
             >
-              <Ionicons name="notifications" size={16} color="#34D399" />
+              <MaterialCommunityIcons
+                name="bell-ring-outline"
+                size={15}
+                color="#34D399"
+              />
               <Text
                 allowFontScaling={false}
                 className="text-emerald-300 font-bold text-xs ml-1"
@@ -562,8 +582,8 @@ export default function SmartNetworkingScreen() {
           </View>
         </View>
 
-        {/* 4 Tabs: Compact & Overflow-Proof */}
-        <View className="flex-row bg-slate-800 p-1 rounded-2xl mt-3 mb-2 border border-slate-700">
+        {/* 4 Tabs */}
+        <View className="flex-row bg-[#131C31] p-1 rounded-2xl mt-3 mb-2 border border-slate-800">
           {[
             { id: "today", label: `আজ (${todayDueContacts.length})` },
             {
@@ -605,15 +625,19 @@ export default function SmartNetworkingScreen() {
       <View className="flex-1 px-4">
         {displayedList.length === 0 ? (
           <View className="flex-1 items-center justify-center pb-12">
-            <View className="w-18 h-18 p-5 bg-slate-800 rounded-full items-center justify-center mb-4 border border-slate-700">
-              <Ionicons name="people-outline" size={34} color="#818CF8" />
+            <View className="p-5 bg-[#131C31] rounded-full items-center justify-center mb-4 border border-slate-800">
+              <MaterialCommunityIcons
+                name="account-heart-outline"
+                size={36}
+                color="#818CF8"
+              />
             </View>
             <Text
               allowFontScaling={false}
               className="text-slate-200 font-bold text-base mb-1 text-center"
             >
               {activeTab === "today"
-                ? "আজ সন্ধ্যা ৭টায় কারো রিমাইন্ডার নেই 🎉"
+                ? "আজ সন্ধ্যা ৭টায় কারো রিমাইন্ডার নেই"
                 : "এই ক্যাটাগরিতে এখনো কেউ নেই"}
             </Text>
             <Text
@@ -637,7 +661,7 @@ export default function SmartNetworkingScreen() {
             renderItem={({ item }) => {
               const cfg = getCategoryConfig(item.category);
               return (
-                <View className="bg-slate-800 border border-slate-700 p-3.5 rounded-3xl mb-3">
+                <View className="bg-[#131C31] border border-slate-800 p-3.5 rounded-3xl mb-3">
                   <View className="flex-row items-center justify-between mb-3">
                     <View className="flex-row items-center flex-1 pr-2">
                       <Pressable
@@ -660,40 +684,39 @@ export default function SmartNetworkingScreen() {
                         >
                           {item.name}
                         </Text>
-                        <Text
-                          allowFontScaling={false}
-                          numberOfLines={1}
-                          className="text-indigo-300 text-[11px] font-semibold mt-0.5"
-                        >
-                          📅 Next: {formatDate(item.nextDueDate)}
-                        </Text>
+                        <View className="flex-row items-center mt-0.5">
+                          <Feather name="calendar" size={11} color="#818CF8" />
+                          <Text
+                            allowFontScaling={false}
+                            numberOfLines={1}
+                            className="text-indigo-300 text-[11px] font-semibold ml-1"
+                          >
+                            Next: {formatDate(item.nextDueDate)}
+                          </Text>
+                        </View>
                       </View>
                     </View>
 
                     <Pressable
                       onPress={() => void deleteContact(item.id, item.name)}
-                      className="p-2 rounded-xl bg-slate-900"
+                      className="p-2 rounded-xl bg-[#0B1120] border border-slate-800"
                     >
-                      <Ionicons
-                        name="trash-outline"
-                        size={16}
-                        color="#F43F5E"
-                      />
+                      <Feather name="trash-2" size={15} color="#F43F5E" />
                     </Pressable>
                   </View>
 
                   {item.note ? (
-                    <View className="bg-slate-900/70 px-3 py-2 rounded-xl border border-slate-700/60 mb-3">
+                    <View className="bg-[#0B1120] px-3 py-2 rounded-xl border border-slate-800 mb-3 flex-row items-center">
+                      <Feather name="file-text" size={12} color="#818CF8" />
                       <Text
                         allowFontScaling={false}
-                        className="text-indigo-300 text-xs italic"
+                        className="text-indigo-300 text-xs italic ml-1.5 flex-1"
                       >
-                        📝 নোট: {item.note}
+                        {item.note}
                       </Text>
                     </View>
                   ) : null}
 
-                  {/* 3 Equal-Width Compact Action Buttons (Never overflows!) */}
                   <View className="flex-row gap-2">
                     <Pressable
                       onPress={() => void handleInteraction(item, "call")}
@@ -729,7 +752,7 @@ export default function SmartNetworkingScreen() {
 
                     <Pressable
                       onPress={() => void handleInteraction(item, "done")}
-                      className="flex-1 bg-slate-900 border border-slate-700 py-2.5 px-1.5 rounded-xl flex-row items-center justify-center"
+                      className="flex-1 bg-[#0B1120] border border-slate-800 py-2.5 px-1.5 rounded-xl flex-row items-center justify-center"
                     >
                       <Ionicons
                         name="checkmark-done"
@@ -755,7 +778,7 @@ export default function SmartNetworkingScreen() {
       {/* PHONEBOOK CONTACT PICKER MODAL */}
       <Modal visible={pickerModalVisible} animationType="slide">
         <SafeAreaView
-          className="flex-1 bg-slate-900"
+          className="flex-1 bg-[#0B1120]"
           edges={["top", "bottom", "left", "right"]}
         >
           <View className="flex-row justify-between items-center px-5 pt-3 pb-3">
@@ -776,7 +799,7 @@ export default function SmartNetworkingScreen() {
 
           <View className="px-5 mb-3">
             <TextInput
-              className="bg-slate-800 text-white px-4 py-2.5 rounded-2xl border border-slate-700 text-sm"
+              className="bg-[#131C31] text-white px-4 py-2.5 rounded-2xl border border-slate-800 text-sm"
               placeholder="নাম বা নাম্বার দিয়ে খুঁজুন..."
               placeholderTextColor="#64748B"
               value={searchInput}
@@ -795,14 +818,15 @@ export default function SmartNetworkingScreen() {
             <FlatList
               data={filteredPhoneContacts}
               keyExtractor={(item, idx) => `${item.id}-${idx}`}
+              keyboardShouldPersistTaps="handled"
               contentContainerStyle={{
                 paddingHorizontal: 20,
-                paddingBottom: Math.max(28, insets.bottom + 16),
+                paddingBottom: Math.max(28, insets.bottom + keyboardHeight + 16),
               }}
               renderItem={({ item }) => (
                 <Pressable
                   onPress={() => setSelectedContactToAdd(item)}
-                  className="bg-slate-800 p-3.5 rounded-2xl mb-2 border border-slate-700 flex-row items-center justify-between"
+                  className="bg-[#131C31] p-3.5 rounded-2xl mb-2 border border-slate-800 flex-row items-center justify-between"
                 >
                   <View className="flex-1 pr-3">
                     <Text
@@ -828,17 +852,25 @@ export default function SmartNetworkingScreen() {
         </SafeAreaView>
       </Modal>
 
-      {/* 3-CATEGORY SELECTION MODAL (Scrollable + SafeArea Padded so never clipped!) */}
+      {/* 3-CATEGORY SELECTION MODAL (Keyboard-Safe!) */}
       <Modal transparent visible={!!selectedContactToAdd} animationType="fade">
         <KeyboardAvoidingView
-          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          behavior={Platform.OS === "ios" ? "padding" : "height"}
           className="flex-1 bg-black/75 justify-end"
         >
           <View
-            style={{ paddingBottom: Math.max(20, insets.bottom + 12) }}
-            className="bg-slate-900 w-full rounded-t-[28px] px-5 pt-5 border-t border-slate-700 max-h-[88%]"
+            style={{
+              paddingBottom:
+                keyboardHeight > 0
+                  ? keyboardHeight + 16
+                  : Math.max(20, insets.bottom + 12),
+            }}
+            className="bg-slate-900 w-full rounded-t-[28px] px-5 pt-5 border-t border-slate-700 max-h-[90%]"
           >
-            <ScrollView showsVerticalScrollIndicator={false}>
+            <ScrollView
+              showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
+            >
               <Text
                 allowFontScaling={false}
                 numberOfLines={1}

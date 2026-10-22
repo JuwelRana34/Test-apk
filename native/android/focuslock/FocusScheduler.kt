@@ -10,6 +10,7 @@ import android.os.Looper
 import android.provider.Settings
 import android.widget.Toast
 import org.json.JSONArray
+import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -18,20 +19,14 @@ import java.util.Locale
 object FocusScheduler {
 
     private const val MIN_VALID_LOCK_DURATION_MILLIS = (30 * 60 * 1000L) - 10_000L
+    // Max Schedule Lock Duration = 10 Hours (600 minutes)
+    const val MAX_SCHEDULE_DURATION_MILLIS = 10 * 60 * 60 * 1000L
 
-    /**
-     * 🌟 Anti-Cheat Earned Emergency Pass & Daily Streak Engine:
-     * ১. ফোনের Automatic Date & Time (Settings.Global.AUTO_TIME) অন থাকতে হবে—হাত দিয়ে তারিখ পাল্টালে স্ট্রিক যোগ হবে না!
-     * ২. হার্ডওয়্যার ঘড়ি ও আসল সময় অনুযায়ী কমপক্ষে ৩০ মিনিটের লক পূর্ণ হতে হবে।
-     * ৩. একই তারিখে সর্বোচ্চ ১টি স্ট্রিক যোগ হবে।
-     * ৪. টানা ৩ দিন পূর্ণ হলে TOTAL_PASSES_EARNED বাড়বে এবং অ্যাপ থেকে বের হলেও চিরস্থায়ীভাবে সেভ থাকবে।
-     */
     @Synchronized
     fun recordSuccessfulLockDay(context: Context, completedDurationMillis: Long) {
         val prefs = context.getSharedPreferences("FocusModePrefs", Context.MODE_PRIVATE)
         val mainHandler = Handler(Looper.getMainLooper())
 
-        // Anti-Cheat 1: Check if user disabled Automatic Date & Time in phone settings
         val isAutoTimeEnabled = try {
             Settings.Global.getInt(context.contentResolver, Settings.Global.AUTO_TIME, 1) == 1
         } catch (_: Exception) {
@@ -49,7 +44,6 @@ object FocusScheduler {
             return
         }
 
-        // Anti-Cheat 2: Must complete at least 30 minutes (verified against monotonic hardware clock)
         if (completedDurationMillis < MIN_VALID_LOCK_DURATION_MILLIS) {
             mainHandler.post {
                 Toast.makeText(
@@ -64,8 +58,21 @@ object FocusScheduler {
         val todayStr = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
         val lastDate = prefs.getString("LAST_COMPLETED_DATE", "") ?: ""
 
-        // Anti-Cheat 3: Prevent backwards date travel or duplicate streak on the same day
+        // Record daily focus minutes into COMPLETED_HISTORY_JSON for the 60-Day GitHub Heatmap Grid!
+        val completedMins = (completedDurationMillis / 60000L).toInt().coerceAtLeast(30)
+        val historyStr = prefs.getString("COMPLETED_HISTORY_JSON", "{}") ?: "{}"
+        val historyObj = try {
+            JSONObject(historyStr)
+        } catch (_: Exception) {
+            JSONObject()
+        }
+        val prevMinsToday = historyObj.optInt(todayStr, 0)
+        historyObj.put(todayStr, prevMinsToday + completedMins)
+
         if (lastDate.isNotEmpty() && todayStr <= lastDate) {
+            prefs.edit()
+                .putString("COMPLETED_HISTORY_JSON", historyObj.toString())
+                .commit()
             mainHandler.post {
                 Toast.makeText(
                     context.applicationContext,
@@ -107,6 +114,7 @@ object FocusScheduler {
             .putInt("TOTAL_PASSES_USED", totalUsed)
             .putInt("EMERGENCY_PASSES", currentPasses)
             .putString("LAST_COMPLETED_DATE", todayStr)
+            .putString("COMPLETED_HISTORY_JSON", historyObj.toString())
             .commit()
 
         val finalPassCount = currentPasses
@@ -115,13 +123,13 @@ object FocusScheduler {
             if (earnedNewPass) {
                 Toast.makeText(
                     context.applicationContext,
-                    "🎟️ অভিনন্দন! টানা ৩ দিন লক পূর্ণ করায় +1 Emergency Pass পেয়েছেন! (মোট: $finalPassCount/5)",
+                    "অভিনন্দন! টানা ৩ দিন লক পূর্ণ করায় +1 Emergency Pass পেয়েছেন! (মোট: $finalPassCount/5)",
                     Toast.LENGTH_LONG
                 ).show()
             } else {
                 Toast.makeText(
                     context.applicationContext,
-                    "🔥 আজকের স্ট্রিক সম্পন্ন! ($finalStreakCount/3 দিন)",
+                    "আজকের স্ট্রিক সম্পন্ন! ($finalStreakCount/3 দিন)",
                     Toast.LENGTH_LONG
                 ).show()
             }

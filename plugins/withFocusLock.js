@@ -54,7 +54,7 @@ function withFocusLockManifest(config) {
       ],
     });
 
-    // 2. Receivers setup (SessionTriggerReceiver, BootReceiver, LockdownAdminReceiver)
+    // 2. Receivers setup
     app.receiver = app.receiver || [];
     app.receiver = app.receiver.filter(
       (receiver) =>
@@ -101,7 +101,6 @@ function withFocusLockManifest(config) {
       ],
     });
 
-    // Device Administrator Receiver (Uninstall Protection)
     app.receiver.push({
       $: {
         "android:name": ".LockdownAdminReceiver",
@@ -162,6 +161,8 @@ function withFocusLockManifest(config) {
         mainActivity.$["android:launchMode"] = "singleTask";
         mainActivity.$["android:showWhenLocked"] = "true";
         mainActivity.$["android:turnScreenOn"] = "true";
+        // 🌟 Fix Keyboard hiding input boxes on Android!
+        mainActivity.$["android:windowSoftInputMode"] = "adjustResize";
       }
     }
 

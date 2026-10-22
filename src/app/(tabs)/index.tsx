@@ -1,304 +1,765 @@
-import { Ionicons } from "@expo/vector-icons";
+import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { useFocusEffect, useRouter } from "expo-router";
+import * as DocumentPicker from "expo-document-picker";
+import { useFocusEffect, useIsFocused, useRouter } from "expo-router";
 import { StatusBar } from "expo-status-bar";
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useMemo, useState } from "react";
 import {
+  Alert,
   Image,
+  Linking,
   NativeModules,
   Platform,
+  Pressable,
   ScrollView,
   Text,
   TouchableOpacity,
   View,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
   CACHED_USER_PROFILE_KEY,
   CachedUserProfile,
+  getInAppNotices,
 } from "../../lib/supabase";
-
-type IoniconsName = React.ComponentProps<typeof Ionicons>["name"];
-
-interface ServiceIconProps {
-  icon: IoniconsName;
-  label: string;
-  color: string;
-  bg: string;
-  onPress?: () => void;
-}
 
 const { FocusLock } = NativeModules;
 
+interface HomeContactItem {
+  id: string;
+  name: string;
+  phoneNumber: string;
+  category: "family" | "friends" | "network";
+  nextDueDate: number;
+  note?: string;
+}
+
 export default function HomePage() {
-  const [showId, setShowId] = useState(false);
-  const [userName, setUserName] = useState("Juwel Rana");
-  const [avatarUri, setAvatarUri] = useState(
-    "https://i.pravatar.cc/150?img=33",
-  );
+  const router = useRouter();
+  const isFocused = useIsFocused();
+  const insets = useSafeAreaInsets();
+
+  const [userName, setUserName] = useState("JnUITS Member");
+  const [avatarUri, setAvatarUri] = useState<string | undefined>(undefined);
   const [emergencyPasses, setEmergencyPasses] = useState(0);
   const [streakDays, setStreakDays] = useState(0);
-  const router = useRouter();
+  const [totalCompleted, setTotalCompleted] = useState(0);
+  const [isFocusActive, setIsFocusActive] = useState(false);
+  const [remainingMins, setRemainingMins] = useState(0);
+  const [historyMap, setHistoryMap] = useState<Record<string, number>>({});
+  const [dueTodayContacts, setDueTodayContacts] = useState<HomeContactItem[]>(
+    [],
+  );
+  const [totalContacts, setTotalContacts] = useState(0);
+  const [unreadNotices, setUnreadNotices] = useState(0);
 
   useFocusEffect(
     useCallback(() => {
-      const loadHomeStatus = async () => {
+      const loadHomeDashboard = async () => {
         try {
-          const cached = await AsyncStorage.getItem(CACHED_USER_PROFILE_KEY);
-          if (cached) {
-            const p: CachedUserProfile = JSON.parse(cached);
+          const [cachedProfileRaw, contactsRaw, noticesList] =
+            await Promise.all([
+              AsyncStorage.getItem(CACHED_USER_PROFILE_KEY),
+              AsyncStorage.getItem("@networking_contacts"),
+              getInAppNotices(),
+            ]);
+
+          setUnreadNotices(noticesList.filter((n) => !n.read).length);
+
+          if (cachedProfileRaw) {
+            const p: CachedUserProfile = JSON.parse(cachedProfileRaw);
             if (p.name) setUserName(p.name);
             if (p.avatarUrl) setAvatarUri(p.avatarUrl);
             setEmergencyPasses(p.emergencyPasses ?? 0);
             setStreakDays(p.streakDays ?? 0);
           }
 
+          if (contactsRaw) {
+            const parsed: HomeContactItem[] = JSON.parse(contactsRaw);
+            setTotalContacts(parsed.length);
+            const todayEnd = new Date().setHours(23, 59, 59, 999);
+            const due = parsed
+              .filter((c) => c.nextDueDate <= todayEnd)
+              .sort((a, b) => a.nextDueDate - b.nextDueDate);
+            setDueTodayContacts(due);
+          } else {
+            setTotalContacts(0);
+            setDueTodayContacts([]);
+          }
+
           if (Platform.OS === "android" && FocusLock?.getFocusSessionState) {
             const s = await FocusLock.getFocusSessionState();
+            const active = !!(s.active && s.endTimeMillis > Date.now());
+            setIsFocusActive(active);
+            setRemainingMins(
+              active
+                ? Math.max(1, Math.ceil((s.endTimeMillis - Date.now()) / 60000))
+                : 0,
+            );
             setEmergencyPasses(s.emergencyPasses ?? 0);
             setStreakDays(s.streakDays ?? 0);
+            setTotalCompleted(s.totalCompleted ?? 0);
+            if (s.completedHistoryJson) {
+              try {
+                setHistoryMap(JSON.parse(s.completedHistoryJson));
+              } catch {}
+            }
           }
         } catch {}
       };
-      void loadHomeStatus();
+      void loadHomeDashboard();
     }, []),
   );
 
+  // Pick & Open Study PDF directly from Home (Only .pdf files allowed!)
+  const handleOpenStudyPdf = async () => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: "application/pdf",
+        copyToCacheDirectory: true,
+      });
+
+      if (result.canceled || !result.assets || result.assets.length === 0) {
+        return;
+      }
+
+      const asset = result.assets[0];
+      const fileName = (asset.name || "").toLowerCase();
+      const mime = (asset.mimeType || "").toLowerCase();
+
+      if (!fileName.endsWith(".pdf") && mime !== "application/pdf") {
+        Alert.alert(
+          "শুধুমাত্র PDF ফাইল অনুমোদিত",
+          "পড়াশোনার জন্য শুধুমাত্র .pdf ফাইল সিলেক্ট করুন।",
+        );
+        return;
+      }
+
+      if (Platform.OS === "android" && FocusLock?.openPdfUri) {
+        await FocusLock.openPdfUri(asset.uri);
+      } else {
+        await Linking.openURL(asset.uri);
+      }
+    } catch {
+      Alert.alert(
+        "PDF ওপেন করা যায়নি",
+        "ফোনে News Plus বা Google Drive PDF Viewer ইনস্টল করা আছে কি না চেক করুন।",
+      );
+    }
+  };
+
+  // Last 7 days mini focus strip
+  const last7Days = useMemo(() => {
+    const days = [];
+    const dayLetters = ["S", "M", "T", "W", "T", "F", "S"];
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date(today);
+      d.setDate(today.getDate() - i);
+      const yyyy = d.getFullYear();
+      const mm = String(d.getMonth() + 1).padStart(2, "0");
+      const dd = String(d.getDate()).padStart(2, "0");
+      const key = `${yyyy}-${mm}-${dd}`;
+      const mins = historyMap[key] || 0;
+      days.push({
+        key,
+        letter: dayLetters[d.getDay()],
+        dateNum: d.getDate(),
+        mins,
+        done: mins >= 30,
+        isToday: i === 0,
+      });
+    }
+    return days;
+  }, [historyMap]);
+
+  const initial = userName.charAt(0).toUpperCase();
+  const primaryDueContact = dueTodayContacts[0];
+
   return (
-    <View className="flex-1 bg-[#F4F5F7]">
-      <StatusBar style="light" />
+    <View className="flex-1 bg-[#0B1120]">
+      {isFocused && <StatusBar style="light" />}
 
-      {/* 🔴 1. TOP HEADER (Brand Color Background) */}
-      <View className="bg-[#4F46E5] pt-14 pb-8 px-5 rounded-b-[30px] z-10">
-        <View className="flex-row justify-between items-center mb-6">
-          {/* Profile Section */}
-          <TouchableOpacity
-            onPress={() => router.push("/(tabs)/profile")}
-            className="flex-row items-center gap-3"
-          >
-            <View className="p-0.5 bg-white rounded-full">
-              <Image
-                source={{ uri: avatarUri }}
-                className="w-11 h-11 rounded-full"
-              />
-            </View>
-            <View>
-              <Text className="text-indigo-100 text-xs font-medium mb-0.5">
-                Welcome back,
-              </Text>
-              <Text className="text-white text-lg font-bold">{userName}</Text>
-            </View>
-          </TouchableOpacity>
-
-          {/* Notification & QR */}
-          <View className="flex-row gap-3">
+      <ScrollView
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={{
+          paddingBottom: Math.max(32, insets.bottom + 20),
+        }}
+      >
+        {/* 1. PREMIUM DARK-INDIGO HERO HEADER */}
+        <View
+          style={{ paddingTop: Math.max(16, insets.top + 10) }}
+          className="bg-[#131C31] pb-6 px-5 rounded-b-[32px] border-b border-indigo-500/20"
+        >
+          <View className="flex-row justify-between items-center mb-5">
+            {/* Profile Greeting */}
             <TouchableOpacity
-              onPress={() => router.push("/features/StrictFocusScreen")}
-              className="w-10 h-10 rounded-full bg-white/20 items-center justify-center"
+              onPress={() => router.push("/(tabs)/profile")}
+              activeOpacity={0.8}
+              className="flex-row items-center flex-1 pr-3"
             >
-              <Ionicons name="shield-checkmark-outline" size={20} color="#FFFFFF" />
+              <View className="p-0.5 rounded-full bg-indigo-500/30 border border-indigo-400">
+                {avatarUri ? (
+                  <Image
+                    source={{ uri: avatarUri }}
+                    className="w-11 h-11 rounded-full"
+                  />
+                ) : (
+                  <View className="w-11 h-11 rounded-full bg-indigo-600 items-center justify-center">
+                    <Text className="text-white font-black text-base">
+                      {initial}
+                    </Text>
+                  </View>
+                )}
+              </View>
+              <View className="ml-3 flex-1">
+                <Text
+                  allowFontScaling={false}
+                  className="text-indigo-300 text-[11px] font-bold uppercase tracking-wider"
+                >
+                  Productivity Suite
+                </Text>
+                <Text
+                  allowFontScaling={false}
+                  numberOfLines={1}
+                  className="text-white text-lg font-black mt-0.5"
+                >
+                  {userName}
+                </Text>
+              </View>
             </TouchableOpacity>
-            <TouchableOpacity
-              onPress={() => router.push("/(tabs)/notice")}
-              className="w-10 h-10 rounded-full bg-white/20 items-center justify-center relative"
+
+            {/* Top Action Buttons */}
+            <View className="flex-row items-center gap-2.5">
+              <TouchableOpacity
+                onPress={() => void handleOpenStudyPdf()}
+                className="w-10 h-10 rounded-2xl bg-sky-500/15 border border-sky-500/30 items-center justify-center"
+              >
+                <MaterialCommunityIcons
+                  name="file-pdf-box"
+                  size={22}
+                  color="#38BDF8"
+                />
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                onPress={() => router.push("/(tabs)/notice")}
+                className="w-10 h-10 rounded-2xl bg-slate-800/90 border border-slate-700 items-center justify-center relative"
+              >
+                <MaterialCommunityIcons
+                  name="bell-outline"
+                  size={21}
+                  color="#E2E8F0"
+                />
+                {unreadNotices > 0 && (
+                  <View className="absolute top-2 right-2 w-2.5 h-2.5 bg-rose-500 rounded-full border border-[#131C31]" />
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+
+          {/* Gamified Pass, Streak & Active Lock Status Bar */}
+          <View className="bg-[#0B1120]/90 border border-slate-800 p-3.5 rounded-2xl flex-row items-center justify-between">
+            <Pressable
+              onPress={() => router.push("/(tabs)/profile")}
+              className="flex-row items-center flex-1 pr-2"
             >
-              <Ionicons
-                name="notifications-outline"
-                size={22}
+              <View className="w-8 h-8 rounded-xl bg-amber-500/15 border border-amber-500/30 items-center justify-center">
+                <MaterialCommunityIcons
+                  name="ticket-confirmation"
+                  size={17}
+                  color="#FBBF24"
+                />
+              </View>
+              <View className="ml-2.5">
+                <Text
+                  allowFontScaling={false}
+                  className="text-white font-black text-xs"
+                >
+                  {emergencyPasses}/5 Passes
+                </Text>
+                <Text
+                  allowFontScaling={false}
+                  className="text-slate-400 text-[10px]"
+                >
+                  Emergency Unlock
+                </Text>
+              </View>
+
+              <View className="w-[1px] h-7 bg-slate-800 mx-3" />
+
+              <View className="w-8 h-8 rounded-xl bg-emerald-500/15 border border-emerald-500/30 items-center justify-center">
+                <MaterialCommunityIcons name="fire" size={18} color="#34D399" />
+              </View>
+              <View className="ml-2.5">
+                <Text
+                  allowFontScaling={false}
+                  className="text-white font-black text-xs"
+                >
+                  {streakDays}/3d Streak
+                </Text>
+                <Text
+                  allowFontScaling={false}
+                  className="text-slate-400 text-[10px]"
+                >
+                  {totalCompleted} Total Done
+                </Text>
+              </View>
+            </Pressable>
+
+            <Pressable
+              onPress={() => router.push("/features/StrictFocusScreen")}
+              className={`px-3 py-2 rounded-xl flex-row items-center border ${
+                isFocusActive
+                  ? "bg-rose-500/20 border-rose-500/50"
+                  : "bg-indigo-600 border-indigo-500"
+              }`}
+            >
+              <MaterialCommunityIcons
+                name={isFocusActive ? "shield-lock" : "rocket-launch"}
+                size={14}
                 color="#FFFFFF"
               />
-              <View className="absolute top-2.5 right-2.5 w-2 h-2 bg-red-500 rounded-full border border-[#4F46E5]" />
-            </TouchableOpacity>
+              <Text
+                allowFontScaling={false}
+                className="text-white font-black text-[11px] ml-1.5"
+              >
+                {isFocusActive ? `${remainingMins}m Left` : "Focus"}
+              </Text>
+            </Pressable>
           </View>
         </View>
 
-        {/* 💳 "Tap for Balance" Style Pass & Streak Pill */}
-        <TouchableOpacity
-          activeOpacity={0.8}
-          onPress={() => setShowId(!showId)}
-          className="bg-white/20 self-start px-4 py-2 rounded-full flex-row items-center border border-white/30"
-        >
-          <Ionicons name="ticket" size={16} color="#FBBF24" />
-          <Text className="text-white font-bold ml-2 text-sm">
-            {showId
-              ? `Emergency Pass: ${emergencyPasses}/5 • Streak: ${streakDays}/3d`
-              : "Tap for Focus Pass & Streak"}
-          </Text>
-        </TouchableOpacity>
-      </View>
+        {/* 2. 2x2 MODERN BENTO GRID (Only the 4 Real Working Features!) */}
+        <View className="px-4 mt-5">
+          <View className="flex-row items-center justify-between mb-3 px-1">
+            <Text
+              allowFontScaling={false}
+              className="text-white font-black text-base"
+            >
+              Core Workspace
+            </Text>
+            <Text
+              allowFontScaling={false}
+              className="text-indigo-400 font-bold text-xs"
+            >
+              4 Active Modules
+            </Text>
+          </View>
 
-      {/* 📜 MAIN SCROLL CONTENT */}
-      <ScrollView showsVerticalScrollIndicator={false} className="z-20">
-        {/* 🟢 2. OVERLAPPING SERVICES GRID (The core bKash/Nagad look) */}
-        <View className="bg-white mx-3 mt-2 rounded-2xl p-2 shadow-lg shadow-slate-200/50">
-          <View className="flex-row justify-between mb-6">
-            <ServiceIcon
-              icon="lock-closed"
-              label="Focus Lock"
-              color="#ec4899"
-              bg="bg-pink-50"
+          {/* Row 1: Strict Focus Lock + Smart Contact CRM */}
+          <View className="flex-row gap-3 mb-3">
+            <TouchableOpacity
+              activeOpacity={0.85}
               onPress={() => router.push("/features/StrictFocusScreen")}
-            />
-            <ServiceIcon
-              icon="code-slash"
-              label="Projects"
-              color="#3b82f6"
-              bg="bg-blue-50"
-            />
-            <ServiceIcon
-              icon="people"
-              label="Contacts"
-              color="#10b981"
-              bg="bg-emerald-50"
+              className="flex-1 bg-[#131C31] border border-rose-500/30 p-4 rounded-3xl justify-between"
+              style={{ minHeight: 148 }}
+            >
+              <View className="flex-row items-center justify-between">
+                <View className="w-11 h-11 rounded-2xl bg-rose-500/15 border border-rose-500/30 items-center justify-center">
+                  <MaterialCommunityIcons
+                    name="shield-lock"
+                    size={24}
+                    color="#F43F5E"
+                  />
+                </View>
+                <View
+                  className={`px-2.5 py-1 rounded-full border ${
+                    isFocusActive
+                      ? "bg-rose-500/20 border-rose-500/50"
+                      : "bg-slate-800 border-slate-700"
+                  }`}
+                >
+                  <Text
+                    allowFontScaling={false}
+                    className={`font-black text-[10px] ${
+                      isFocusActive ? "text-rose-300" : "text-slate-300"
+                    }`}
+                  >
+                    {isFocusActive ? "LOCKED" : "25m / 50m"}
+                  </Text>
+                </View>
+              </View>
+
+              <View className="mt-4">
+                <Text
+                  allowFontScaling={false}
+                  numberOfLines={1}
+                  className="text-white font-black text-base"
+                >
+                  Strict Focus Lock
+                </Text>
+                <Text
+                  allowFontScaling={false}
+                  numberOfLines={2}
+                  className="text-slate-400 text-[11px] mt-1 leading-4"
+                >
+                  Reels ও Shorts ব্লকার, অ্যাপ ও ওয়েবসাইট লক
+                </Text>
+              </View>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              activeOpacity={0.85}
               onPress={() => router.push("/features/SmartNetworking")}
-            />
-            <ServiceIcon
-              icon="library"
-              label="Resources"
-              color="#8b5cf6"
-              bg="bg-violet-50"
-            />
+              className="flex-1 bg-[#131C31] border border-emerald-500/30 p-4 rounded-3xl justify-between"
+              style={{ minHeight: 148 }}
+            >
+              <View className="flex-row items-center justify-between">
+                <View className="w-11 h-11 rounded-2xl bg-emerald-500/15 border border-emerald-500/30 items-center justify-center">
+                  <MaterialCommunityIcons
+                    name="account-heart"
+                    size={24}
+                    color="#34D399"
+                  />
+                </View>
+                <View
+                  className={`px-2.5 py-1 rounded-full border ${
+                    dueTodayContacts.length > 0
+                      ? "bg-emerald-500/20 border-emerald-500/50"
+                      : "bg-slate-800 border-slate-700"
+                  }`}
+                >
+                  <Text
+                    allowFontScaling={false}
+                    className={`font-black text-[10px] ${
+                      dueTodayContacts.length > 0
+                        ? "text-emerald-300"
+                        : "text-slate-300"
+                    }`}
+                  >
+                    {dueTodayContacts.length > 0
+                      ? `${dueTodayContacts.length} DUE TODAY`
+                      : `${totalContacts} SAVED`}
+                  </Text>
+                </View>
+              </View>
+
+              <View className="mt-4">
+                <Text
+                  allowFontScaling={false}
+                  numberOfLines={1}
+                  className="text-white font-black text-base"
+                >
+                  Contact CRM
+                </Text>
+                <Text
+                  allowFontScaling={false}
+                  numberOfLines={2}
+                  className="text-slate-400 text-[11px] mt-1 leading-4"
+                >
+                  পরিবার, বন্ধু ও নেটওয়ার্কের সন্ধ্যা ৭টার রিমাইন্ডার
+                </Text>
+              </View>
+            </TouchableOpacity>
           </View>
 
-          <View className="flex-row justify-between">
-            <ServiceIcon
-              icon="megaphone"
-              label="Notice"
-              color="#f59e0b"
-              bg="bg-amber-50"
-              onPress={() => router.push("/(tabs)/notice")}
-            />
-            <ServiceIcon
-              icon="ribbon"
-              label="Committee"
-              color="#06b6d4"
-              bg="bg-cyan-50"
-            />
-            <ServiceIcon
-              icon="trophy"
-              label="Contests"
-              color="#f43f5e"
-              bg="bg-rose-50"
-            />
-            <ServiceIcon
-              icon="alarm"
-              label="Alarm"
-              color="#8b5cf6"
-              bg="bg-violet-50"
+          {/* Row 2: Hard Alarm + Study PDF Reader */}
+          <View className="flex-row gap-3">
+            <TouchableOpacity
+              activeOpacity={0.85}
               onPress={() => router.push("/features/alarm")}
-            />
+              className="flex-1 bg-[#131C31] border border-violet-500/30 p-4 rounded-3xl justify-between"
+              style={{ minHeight: 148 }}
+            >
+              <View className="flex-row items-center justify-between">
+                <View className="w-11 h-11 rounded-2xl bg-violet-500/15 border border-violet-500/30 items-center justify-center">
+                  <MaterialCommunityIcons
+                    name="alarm-light"
+                    size={24}
+                    color="#A78BFA"
+                  />
+                </View>
+                <View className="px-2.5 py-1 rounded-full bg-violet-500/15 border border-violet-500/30">
+                  <Text
+                    allowFontScaling={false}
+                    className="text-violet-300 font-black text-[10px]"
+                  >
+                    90m CYCLE
+                  </Text>
+                </View>
+              </View>
+
+              <View className="mt-4">
+                <Text
+                  allowFontScaling={false}
+                  numberOfLines={1}
+                  className="text-white font-black text-base"
+                >
+                  Hard Alarm
+                </Text>
+                <Text
+                  allowFontScaling={false}
+                  numberOfLines={2}
+                  className="text-slate-400 text-[11px] mt-1 leading-4"
+                >
+                  ম্যাথ পাজল ও ৯০ মিনিট স্লিপ সাইকেল ক্যালকুলেটর
+                </Text>
+              </View>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              activeOpacity={0.85}
+              onPress={() => void handleOpenStudyPdf()}
+              className="flex-1 bg-[#131C31] border border-sky-500/30 p-4 rounded-3xl justify-between"
+              style={{ minHeight: 148 }}
+            >
+              <View className="flex-row items-center justify-between">
+                <View className="w-11 h-11 rounded-2xl bg-sky-500/15 border border-sky-500/30 items-center justify-center">
+                  <MaterialCommunityIcons
+                    name="file-pdf-box"
+                    size={26}
+                    color="#38BDF8"
+                  />
+                </View>
+                <View className="px-2.5 py-1 rounded-full bg-sky-500/15 border border-sky-500/30">
+                  <Text
+                    allowFontScaling={false}
+                    className="text-sky-300 font-black text-[10px]"
+                  >
+                    ONLY .PDF
+                  </Text>
+                </View>
+              </View>
+
+              <View className="mt-4">
+                <Text
+                  allowFontScaling={false}
+                  numberOfLines={1}
+                  className="text-white font-black text-base"
+                >
+                  Study PDF Reader
+                </Text>
+                <Text
+                  allowFontScaling={false}
+                  numberOfLines={2}
+                  className="text-slate-400 text-[11px] mt-1 leading-4"
+                >
+                  News Plus ও Drive PDF ভিউয়ারে নিরাপদ পড়াশোনা
+                </Text>
+              </View>
+            </TouchableOpacity>
           </View>
         </View>
 
-        {/* 🔵 3. PROMOTIONAL BANNERS (Carousel) */}
-        <View className="mt-4 mb-3">
-          <View className="flex-row justify-between items-center px-5 mb-3">
-            <Text className="text-lg font-bold text-slate-800">Highlights</Text>
-            <TouchableOpacity>
-              <Text className="text-indigo-600 font-bold text-sm">See All</Text>
-            </TouchableOpacity>
-          </View>
-
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={{ paddingHorizontal: 20, gap: 15 }}
+        {/* 3. LIVE 7-DAY FOCUS STREAK STRIP */}
+        <View className="px-4 mt-4">
+          <Pressable
+            onPress={() => router.push("/(tabs)/profile")}
+            className="bg-[#131C31] border border-slate-800 p-4 rounded-3xl"
           >
-            <TouchableOpacity className="w-72 h-36 rounded-2xl overflow-hidden relative shadow-sm">
-              <Image
-                source={{
-                  uri: "https://images.unsplash.com/photo-1542831371-29b0f74f9713?ixlib=rb-1.2.1&auto=format&fit=crop&w=800&q=80",
-                }}
-                className="w-full h-full absolute"
-              />
-              <View className="flex-1 bg-black/40 justify-end p-4">
-                <Text className="text-white font-black text-lg mb-1">
-                  Intra-JnU Hackathon
-                </Text>
-                <Text className="text-slate-200 text-xs font-medium">
-                  Registration Open Now!
+            <View className="flex-row items-center justify-between mb-3">
+              <View className="flex-row items-center">
+                <MaterialCommunityIcons
+                  name="calendar-check"
+                  size={17}
+                  color="#34D399"
+                />
+                <Text
+                  allowFontScaling={false}
+                  className="text-white font-bold text-xs ml-2"
+                >
+                  This Week&apos;s Focus Activity
                 </Text>
               </View>
-            </TouchableOpacity>
+              <Text
+                allowFontScaling={false}
+                className="text-indigo-400 font-bold text-[11px]"
+              >
+                60-Day Graph →
+              </Text>
+            </View>
 
-            <TouchableOpacity className="w-72 h-36 rounded-2xl overflow-hidden relative shadow-sm">
-              <Image
-                source={{
-                  uri: "https://images.unsplash.com/photo-1517048676732-d65bc937f952?ixlib=rb-1.2.1&auto=format&fit=crop&w=800&q=80",
-                }}
-                className="w-full h-full absolute"
-              />
-              <View className="flex-1 bg-indigo-900/50 justify-end p-4">
-                <Text className="text-white font-black text-lg mb-1">
-                  UI/UX Masterclass
-                </Text>
-                <Text className="text-slate-200 text-xs font-medium">
-                  Coming this Friday
-                </Text>
-              </View>
-            </TouchableOpacity>
-          </ScrollView>
+            <View className="flex-row justify-between">
+              {last7Days.map((d) => (
+                <View key={d.key} className="items-center">
+                  <Text
+                    allowFontScaling={false}
+                    className="text-slate-500 font-bold text-[10px] mb-1.5"
+                  >
+                    {d.letter}
+                  </Text>
+                  <View
+                    className={`w-9 h-9 rounded-xl items-center justify-center border ${
+                      d.done
+                        ? "bg-emerald-500/20 border-emerald-400"
+                        : d.isToday
+                          ? "bg-indigo-500/15 border-indigo-400/60"
+                          : "bg-[#0B1120] border-slate-800"
+                    }`}
+                  >
+                    {d.done ? (
+                      <MaterialCommunityIcons
+                        name="check-bold"
+                        size={16}
+                        color="#34D399"
+                      />
+                    ) : (
+                      <Text
+                        allowFontScaling={false}
+                        className={`text-xs font-bold ${
+                          d.isToday ? "text-indigo-300" : "text-slate-500"
+                        }`}
+                      >
+                        {d.dateNum}
+                      </Text>
+                    )}
+                  </View>
+                </View>
+              ))}
+            </View>
+          </Pressable>
         </View>
 
-        {/* 🟡 4. SUGGESTED FOR YOU (List style) */}
-        <View className="px-5 mb-24">
-          <Text className="text-lg font-bold text-slate-800 mb-4">
+        {/* 4. SMART QUICK ACTIONS (Live Due Contact + Instant Focus Setup) */}
+        <View className="px-4 mt-5">
+          <Text
+            allowFontScaling={false}
+            className="text-white font-black text-base mb-3 px-1"
+          >
             Quick Actions
           </Text>
 
-          <TouchableOpacity
-            onPress={() => router.push("/features/StrictFocusScreen")}
-            className="bg-white p-4 rounded-2xl flex-row items-center shadow-sm shadow-slate-100 mb-3 border border-slate-100"
-          >
-            <View className="w-12 h-12 bg-rose-50 rounded-full items-center justify-center mr-4">
-              <Ionicons name="shield-checkmark" size={24} color="#F43F5E" />
-            </View>
-            <View className="flex-1">
-              <Text className="text-slate-800 font-bold text-base mb-0.5">
-                Start 25m/5m Focus Session
-              </Text>
-              <Text className="text-slate-500 text-xs">
-                Emergency Passes: {emergencyPasses}/5 • Streak: {streakDays}/3d
-              </Text>
-            </View>
-            <Ionicons name="chevron-forward" size={20} color="#cbd5e1" />
-          </TouchableOpacity>
+          {/* Action 1: Live Due Contact Card (or Add Contact Prompt) */}
+          {primaryDueContact ? (
+            <View className="bg-[#131C31] border border-emerald-500/30 p-4 rounded-3xl mb-3">
+              <View className="flex-row items-center justify-between mb-3">
+                <View className="flex-row items-center flex-1 pr-2">
+                  <View className="w-10 h-10 rounded-2xl bg-emerald-500/15 border border-emerald-500/30 items-center justify-center mr-3">
+                    <MaterialCommunityIcons
+                      name="phone-ring"
+                      size={20}
+                      color="#34D399"
+                    />
+                  </View>
+                  <View className="flex-1">
+                    <Text
+                      allowFontScaling={false}
+                      className="text-emerald-300 font-bold text-[10px] uppercase tracking-wider"
+                    >
+                      আজ কথা বলার রিমাইন্ডার ({dueTodayContacts.length} জন)
+                    </Text>
+                    <Text
+                      allowFontScaling={false}
+                      numberOfLines={1}
+                      className="text-white font-black text-base mt-0.5"
+                    >
+                      {primaryDueContact.name}
+                    </Text>
+                  </View>
+                </View>
+                <Pressable
+                  onPress={() => router.push("/features/SmartNetworking")}
+                  className="bg-slate-800 px-3 py-1.5 rounded-xl border border-slate-700"
+                >
+                  <Text
+                    allowFontScaling={false}
+                    className="text-slate-300 font-bold text-[11px]"
+                  >
+                    See All
+                  </Text>
+                </Pressable>
+              </View>
 
+              <View className="flex-row gap-2.5">
+                <Pressable
+                  onPress={() =>
+                    void Linking.openURL(`tel:${primaryDueContact.phoneNumber}`)
+                  }
+                  className="flex-1 bg-indigo-600 py-2.5 rounded-xl flex-row items-center justify-center"
+                >
+                  <Ionicons name="call" size={14} color="#FFFFFF" />
+                  <Text
+                    allowFontScaling={false}
+                    className="text-white font-bold text-xs ml-1.5"
+                  >
+                    সরাসরি কল করুন
+                  </Text>
+                </Pressable>
+                <Pressable
+                  onPress={() =>
+                    void Linking.openURL(
+                      `whatsapp://send?phone=${primaryDueContact.phoneNumber}`,
+                    )
+                  }
+                  className="flex-1 bg-emerald-500/15 border border-emerald-500/40 py-2.5 rounded-xl flex-row items-center justify-center"
+                >
+                  <Ionicons name="logo-whatsapp" size={14} color="#34D399" />
+                  <Text
+                    allowFontScaling={false}
+                    className="text-emerald-300 font-bold text-xs ml-1.5"
+                  >
+                    WhatsApp
+                  </Text>
+                </Pressable>
+              </View>
+            </View>
+          ) : (
+            <TouchableOpacity
+              activeOpacity={0.85}
+              onPress={() => router.push("/features/SmartNetworking")}
+              className="bg-[#131C31] border border-slate-800 p-4 rounded-3xl flex-row items-center mb-3"
+            >
+              <View className="w-11 h-11 bg-emerald-500/15 border border-emerald-500/30 rounded-2xl items-center justify-center mr-3.5">
+                <MaterialCommunityIcons
+                  name="account-multiple-check"
+                  size={22}
+                  color="#34D399"
+                />
+              </View>
+              <View className="flex-1 pr-2">
+                <Text
+                  allowFontScaling={false}
+                  className="text-white font-bold text-sm"
+                >
+                  আজ কারো কল রিমাইন্ডার নেই
+                </Text>
+                <Text
+                  allowFontScaling={false}
+                  className="text-slate-400 text-xs mt-0.5"
+                >
+                  ট্যাপ করে পরিবার ও বন্ধুদের পরবর্তী রিমাইন্ডার তারিখ দেখুন
+                </Text>
+              </View>
+              <Ionicons name="chevron-forward" size={18} color="#64748B" />
+            </TouchableOpacity>
+          )}
+
+          {/* Action 2: Quick Focus Lock & Schedule Setup */}
           <TouchableOpacity
-            onPress={() => router.push("/features/SmartNetworking")}
-            className="bg-white p-4 rounded-2xl flex-row items-center shadow-sm shadow-slate-100 mb-3 border border-slate-100"
+            activeOpacity={0.85}
+            onPress={() => router.push("/features/StrictFocusScreen")}
+            className="bg-[#131C31] border border-slate-800 p-4 rounded-3xl flex-row items-center"
           >
-            <View className="w-12 h-12 bg-emerald-50 rounded-full items-center justify-center mr-4">
-              <Ionicons name="people" size={24} color="#10B981" />
+            <View className="w-11 h-11 bg-rose-500/15 border border-rose-500/30 rounded-2xl items-center justify-center mr-3.5">
+              <MaterialCommunityIcons
+                name="timer-lock-outline"
+                size={22}
+                color="#F43F5E"
+              />
             </View>
-            <View className="flex-1">
-              <Text className="text-slate-800 font-bold text-base mb-0.5">
-                3-Category Contact Reminders
+            <View className="flex-1 pr-2">
+              <Text
+                allowFontScaling={false}
+                className="text-white font-bold text-sm"
+              >
+                {isFocusActive
+                  ? "ফোকাস লক ড্যাশবোর্ডে ফিরে যান"
+                  : "Start 25m/5m Session or 50m/10m Schedule"}
               </Text>
-              <Text className="text-slate-500 text-xs">
-                Check who is due for a call or WhatsApp today
+              <Text
+                allowFontScaling={false}
+                className="text-slate-400 text-xs mt-0.5"
+              >
+                সেশন লক (সর্বোচ্চ ৬ ঘণ্টা) • শিডিউল লক (সর্বোচ্চ ১০ ঘণ্টা)
               </Text>
             </View>
-            <Ionicons name="chevron-forward" size={20} color="#cbd5e1" />
+            <Ionicons name="chevron-forward" size={18} color="#64748B" />
           </TouchableOpacity>
         </View>
       </ScrollView>
     </View>
   );
 }
-
-const ServiceIcon = ({ icon, label, color, bg, onPress }: ServiceIconProps) => (
-  <TouchableOpacity
-    onPress={onPress}
-    activeOpacity={0.7}
-    className="items-center w-[70px]"
-  >
-    <View
-      className={`${bg} w-14 h-14 rounded-full items-center justify-center mb-2`}
-    >
-      <Ionicons name={icon} size={28} color={color} />
-    </View>
-    <Text className="text-slate-600 text-xs font-semibold text-center">
-      {label}
-    </Text>
-  </TouchableOpacity>
-);

@@ -10,20 +10,9 @@ function withSplitApks(config) {
         abi {
             reset()
             enable enableSeparateBuildPerCPUArchitecture
-            universalApk false  // If true, also generate a universal APK
-            // 🌟 ফিক্স: সরাসরি আর্কিটেকচারের নাম বসিয়ে দেওয়া হয়েছে
-            include "armeabi-v7a", "x86", "arm64-v8a", "x86_64"
-        }
-    }
-    // applicationVariants are e.g. debug, release
-    applicationVariants.all { variant ->
-        variant.outputs.each { output ->
-            def versionCodes = ["armeabi-v7a": 1, "x86": 2, "arm64-v8a": 3, "x86_64": 4]
-            def abi = output.getFilter(com.android.build.OutputFile.ABI)
-            if (abi != null) {  
-                output.versionCodeOverride =
-                        defaultConfig.versionCode * 1000 + versionCodes.get(abi)
-            }
+            universalApk false
+            // 🌟 ফিক্স: শুধুমাত্র arm64-v8a রাখা হলো যাতে Expo সরাসরি ১টি সিঙ্গেল .apk ডাউনলোড দেয় (.tar.gz নয়!)
+            include "arm64-v8a"
         }
     }
 `;

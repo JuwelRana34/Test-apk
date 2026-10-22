@@ -21,7 +21,7 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
 const { FocusLock } = NativeModules;
 
 // ============================================================================
-// NOTIFICATIONS ENGINE (100% Online Expo Push + Offline Local Scheduled)
+// NOTIFICATIONS ENGINE (100% Online Expo Push + Offline Local Scheduled @ 7 PM)
 // ============================================================================
 
 export const CONTACT_REMINDER_CHANNEL = "contact-reminders-v2";
@@ -344,7 +344,7 @@ export async function markAllInAppNoticesRead(): Promise<AppNoticeItem[]> {
 }
 
 // ============================================================================
-// OFFLINE-FIRST SYNC & GOOGLE PROFILE BACKUP ENGINE
+// ANTI-CHEAT OFFLINE-FIRST SYNC & GOOGLE PROFILE BACKUP ENGINE
 // ============================================================================
 
 export const OFFLINE_SYNC_QUEUE_KEY = "@jnuits_offline_dirty_flag";
@@ -358,6 +358,65 @@ export interface CachedUserProfile {
   emergencyPasses: number;
   streakDays: number;
   lastSyncedAt: number;
+}
+
+/**
+ * 🌟 Anti-Cheat Online Pass Spending Check:
+ * Verifies internet connection & updates `totalPassesUsed` in Supabase Cloud FIRST
+ * before unlocking so user cannot spend pass offline and Clear App Data!
+ */
+export async function spendEmergencyPassWithCloudCheck(): Promise<boolean> {
+  try {
+    if (Platform.OS !== "android" || !FocusLock?.getFocusSessionState) {
+      return false;
+    }
+
+    const s = await FocusLock.getFocusSessionState();
+    const localEarned = s.totalPassesEarned ?? s.emergencyPasses ?? 0;
+    const localUsed = s.totalPassesUsed ?? 0;
+    if (localEarned - localUsed <= 0) return false;
+
+    const nextUsed = localUsed + 1;
+    const nextPasses = Math.max(0, Math.min(5, localEarned - nextUsed));
+
+    const {
+      data: { user },
+      error: getError,
+    } = await supabase.auth.getUser();
+
+    if (getError || !user) {
+      return false;
+    }
+
+    const existingBackup = user.user_metadata?.jnuits_backup_v2 || {};
+    const mergedEarned = Math.max(
+      localEarned,
+      existingBackup.totalPassesEarned ?? existingBackup.emergencyPasses ?? 0,
+    );
+    const mergedUsed = Math.max(nextUsed, (existingBackup.totalPassesUsed ?? 0) + 1);
+    const finalPasses = Math.max(0, Math.min(5, mergedEarned - mergedUsed));
+
+    const { error: updateErr } = await supabase.auth.updateUser({
+      data: {
+        jnuits_backup_v2: {
+          ...existingBackup,
+          updatedAt: Date.now(),
+          totalPassesEarned: mergedEarned,
+          totalPassesUsed: mergedUsed,
+          emergencyPasses: finalPasses,
+          streakDays: 0,
+        },
+      },
+    });
+
+    if (updateErr) {
+      return false;
+    }
+
+    return nextPasses >= 0;
+  } catch {
+    return false;
+  }
 }
 
 export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
@@ -380,8 +439,11 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
 
     let nativeLockState = {
       emergencyPasses: 0,
+      totalPassesEarned: 0,
+      totalPassesUsed: 0,
       streakDays: 0,
       totalCompleted: 0,
+      lastCompletedDate: "",
     };
 
     if (Platform.OS === "android" && FocusLock?.getFocusSessionState) {
@@ -389,26 +451,14 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
         const s = await FocusLock.getFocusSessionState();
         nativeLockState = {
           emergencyPasses: s.emergencyPasses ?? 0,
+          totalPassesEarned: s.totalPassesEarned ?? s.emergencyPasses ?? 0,
+          totalPassesUsed: s.totalPassesUsed ?? 0,
           streakDays: s.streakDays ?? 0,
           totalCompleted: s.totalCompleted ?? 0,
+          lastCompletedDate: s.lastCompletedDate || "",
         };
       } catch {}
     }
-
-    const payload = {
-      jnuits_backup_v2: {
-        updatedAt: Date.now(),
-        contacts: contactsRaw ? JSON.parse(contactsRaw) : [],
-        networkingStats: statsRaw ? JSON.parse(statsRaw) : null,
-        allowedApps: allowedAppsRaw ? JSON.parse(allowedAppsRaw) : [],
-        allowedDomains: allowedDomainsRaw ? JSON.parse(allowedDomainsRaw) : [],
-        schedules: schedulesRaw ? JSON.parse(schedulesRaw) : [],
-        ytLimitMinutes: ytLimitRaw ? parseInt(ytLimitRaw, 10) : 90,
-        emergencyPasses: nativeLockState.emergencyPasses,
-        streakDays: nativeLockState.streakDays,
-        totalCompleted: nativeLockState.totalCompleted,
-      },
-    };
 
     const cachedRaw = await AsyncStorage.getItem(CACHED_USER_PROFILE_KEY);
     if (cachedRaw) {
@@ -422,6 +472,75 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
     }
 
     await AsyncStorage.setItem(OFFLINE_SYNC_QUEUE_KEY, "true");
+
+    // Fetch cloud metadata first so we monotonically merge Earned/Used counters without losing anything!
+    const {
+      data: { user: currentUser },
+    } = await supabase.auth.getUser();
+
+    const cloudBackup = currentUser?.user_metadata?.jnuits_backup_v2 || {};
+    const cloudEarned =
+      cloudBackup.totalPassesEarned ?? cloudBackup.emergencyPasses ?? 0;
+    const cloudUsed = cloudBackup.totalPassesUsed ?? 0;
+    const cloudLastDate = cloudBackup.lastCompletedDate || "";
+    const cloudStreak = cloudBackup.streakDays ?? 0;
+
+    const mergedEarned = Math.max(nativeLockState.totalPassesEarned, cloudEarned);
+    const mergedUsed = Math.max(nativeLockState.totalPassesUsed, cloudUsed);
+    const mergedPasses = Math.max(0, Math.min(5, mergedEarned - mergedUsed));
+
+    let mergedLastDate = nativeLockState.lastCompletedDate;
+    let mergedStreak = nativeLockState.streakDays;
+    if (cloudLastDate > mergedLastDate) {
+      mergedLastDate = cloudLastDate;
+      mergedStreak = cloudStreak;
+    } else if (cloudLastDate === mergedLastDate && mergedLastDate !== "") {
+      mergedStreak = Math.max(mergedStreak, cloudStreak);
+    }
+
+    // Update native storage with merged monotonic counters if cloud had higher values
+    if (Platform.OS === "android" && FocusLock?.syncPassAndStreakFromCloud) {
+      await FocusLock.syncPassAndStreakFromCloud(
+        mergedPasses,
+        mergedStreak,
+        mergedLastDate,
+        mergedEarned,
+        mergedUsed,
+      );
+    }
+
+    const payload = {
+      jnuits_backup_v2: {
+        updatedAt: Date.now(),
+        contacts: contactsRaw
+          ? JSON.parse(contactsRaw)
+          : cloudBackup.contacts || [],
+        networkingStats: statsRaw
+          ? JSON.parse(statsRaw)
+          : cloudBackup.networkingStats || null,
+        allowedApps: allowedAppsRaw
+          ? JSON.parse(allowedAppsRaw)
+          : cloudBackup.allowedApps || [],
+        allowedDomains: allowedDomainsRaw
+          ? JSON.parse(allowedDomainsRaw)
+          : cloudBackup.allowedDomains || [],
+        schedules: schedulesRaw
+          ? JSON.parse(schedulesRaw)
+          : cloudBackup.schedules || [],
+        ytLimitMinutes: ytLimitRaw
+          ? parseInt(ytLimitRaw, 10)
+          : cloudBackup.ytLimitMinutes || 90,
+        emergencyPasses: mergedPasses,
+        totalPassesEarned: mergedEarned,
+        totalPassesUsed: mergedUsed,
+        streakDays: mergedStreak,
+        lastCompletedDate: mergedLastDate,
+        totalCompleted: Math.max(
+          nativeLockState.totalCompleted,
+          cloudBackup.totalCompleted ?? 0,
+        ),
+      },
+    };
 
     const { data, error } = await supabase.auth.updateUser({
       data: payload,
@@ -439,8 +558,8 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
         avatarUrl:
           data.user.user_metadata?.avatar_url ||
           data.user.user_metadata?.picture,
-        emergencyPasses: nativeLockState.emergencyPasses,
-        streakDays: nativeLockState.streakDays,
+        emergencyPasses: mergedPasses,
+        streakDays: mergedStreak,
         lastSyncedAt: Date.now(),
       };
       await AsyncStorage.setItem(
@@ -465,80 +584,67 @@ export async function restoreCloudBackupAfterGoogleLogin(): Promise<void> {
     if (!user) return;
 
     const backup = user.user_metadata?.jnuits_backup_v2;
-    const profile: CachedUserProfile = {
-      id: user.id,
-      name:
-        user.user_metadata?.full_name ||
-        user.user_metadata?.name ||
-        "JnUITS Member",
-      email: user.email || "",
-      avatarUrl:
-        user.user_metadata?.avatar_url || user.user_metadata?.picture,
-      emergencyPasses: backup?.emergencyPasses ?? 0,
-      streakDays: backup?.streakDays ?? 0,
-      lastSyncedAt: Date.now(),
-    };
-    await AsyncStorage.setItem(
-      CACHED_USER_PROFILE_KEY,
-      JSON.stringify(profile),
-    );
 
-    if (!backup) return;
-
-    const existingContacts = await AsyncStorage.getItem("@networking_contacts");
-    if (
-      (!existingContacts || existingContacts === "[]") &&
-      Array.isArray(backup.contacts) &&
-      backup.contacts.length > 0
-    ) {
-      await AsyncStorage.setItem(
+    if (backup) {
+      const existingContacts = await AsyncStorage.getItem(
         "@networking_contacts",
-        JSON.stringify(backup.contacts),
       );
-    }
-
-    const existingApps = await AsyncStorage.getItem("@focus_allowed_apps");
-    if (
-      (!existingApps || existingApps === "[]") &&
-      Array.isArray(backup.allowedApps) &&
-      backup.allowedApps.length > 0
-    ) {
-      await AsyncStorage.setItem(
-        "@focus_allowed_apps",
-        JSON.stringify(backup.allowedApps),
-      );
-      if (Platform.OS === "android" && FocusLock?.saveAllowedApps) {
-        await FocusLock.saveAllowedApps(backup.allowedApps);
+      if (
+        (!existingContacts || existingContacts === "[]") &&
+        Array.isArray(backup.contacts) &&
+        backup.contacts.length > 0
+      ) {
+        await AsyncStorage.setItem(
+          "@networking_contacts",
+          JSON.stringify(backup.contacts),
+        );
       }
-    }
 
-    const existingDomains = await AsyncStorage.getItem(
-      "@focus_allowed_domains",
-    );
-    if (
-      (!existingDomains || existingDomains === "[]") &&
-      Array.isArray(backup.allowedDomains) &&
-      backup.allowedDomains.length > 0
-    ) {
-      await AsyncStorage.setItem(
+      const existingApps = await AsyncStorage.getItem("@focus_allowed_apps");
+      if (
+        (!existingApps || existingApps === "[]") &&
+        Array.isArray(backup.allowedApps) &&
+        backup.allowedApps.length > 0
+      ) {
+        await AsyncStorage.setItem(
+          "@focus_allowed_apps",
+          JSON.stringify(backup.allowedApps),
+        );
+        if (Platform.OS === "android" && FocusLock?.saveAllowedApps) {
+          await FocusLock.saveAllowedApps(backup.allowedApps);
+        }
+      }
+
+      const existingDomains = await AsyncStorage.getItem(
         "@focus_allowed_domains",
-        JSON.stringify(backup.allowedDomains),
       );
-      if (Platform.OS === "android" && FocusLock?.saveAllowedDomains) {
-        await FocusLock.saveAllowedDomains(backup.allowedDomains);
+      if (
+        (!existingDomains || existingDomains === "[]") &&
+        Array.isArray(backup.allowedDomains) &&
+        backup.allowedDomains.length > 0
+      ) {
+        await AsyncStorage.setItem(
+          "@focus_allowed_domains",
+          JSON.stringify(backup.allowedDomains),
+        );
+        if (Platform.OS === "android" && FocusLock?.saveAllowedDomains) {
+          await FocusLock.saveAllowedDomains(backup.allowedDomains);
+        }
+      }
+
+      // 🌟 Monotonic Anti-Cheat Merge: Never overwrites newly earned local passes with older cloud data!
+      if (Platform.OS === "android" && FocusLock?.syncPassAndStreakFromCloud) {
+        await FocusLock.syncPassAndStreakFromCloud(
+          backup.emergencyPasses ?? 0,
+          backup.streakDays ?? 0,
+          backup.lastCompletedDate || "",
+          backup.totalPassesEarned ?? backup.emergencyPasses ?? 0,
+          backup.totalPassesUsed ?? 0,
+        );
       }
     }
 
-    if (
-      Platform.OS === "android" &&
-      FocusLock?.syncPassAndStreakFromCloud &&
-      typeof backup.emergencyPasses === "number"
-    ) {
-      await FocusLock.syncPassAndStreakFromCloud(
-        backup.emergencyPasses,
-        backup.streakDays ?? 0,
-        backup.lastCompletedDate || "",
-      );
-    }
+    // Immediately sync merged local state back to cloud & update cached profile
+    await syncLocalDataToCloudIfOnline();
   } catch {}
 }

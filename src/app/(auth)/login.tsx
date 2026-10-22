@@ -2,11 +2,13 @@ import { Ionicons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { GoogleSignin } from "@react-native-google-signin/google-signin";
 import { useRouter } from "expo-router";
+import { StatusBar } from "expo-status-bar";
 import React, { useEffect, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
   Image,
+  ImageBackground,
   ScrollView,
   Text,
   TouchableOpacity,
@@ -18,6 +20,9 @@ import {
   restoreCloudBackupAfterGoogleLogin,
   supabase,
 } from "../../lib/supabase";
+
+const LOGIN_BG_URI =
+  "https://images.unsplash.com/photo-1519681393784-d120267933ba?auto=format&fit=crop&w=1000&q=80";
 
 export default function LoginScreen() {
   const router = useRouter();
@@ -80,85 +85,159 @@ export default function LoginScreen() {
   };
 
   return (
-    <SafeAreaView className="flex-1 bg-[#0F172A]" edges={["top", "bottom"]}>
-      <ScrollView
-        contentContainerStyle={{
-          flexGrow: 1,
-          justifyContent: "center",
-          paddingHorizontal: 24,
-          paddingVertical: 24,
-        }}
-        showsVerticalScrollIndicator={false}
+    <ImageBackground
+      source={{ uri: LOGIN_BG_URI }}
+      className="flex-1 bg-[#070B14]"
+      resizeMode="cover"
+    >
+      <StatusBar style="light" />
+      <SafeAreaView
+        className="flex-1 bg-[#070B14]/80"
+        edges={["top", "bottom", "left", "right"]}
       >
-        <View className="items-center mb-8">
-          <View className="w-24 h-24 rounded-3xl bg-indigo-500/20 border border-indigo-500/40 items-center justify-center mb-5">
-            <Ionicons name="shield-checkmark" size={48} color="#818CF8" />
-          </View>
-          <Text className="text-3xl font-black text-white text-center">
-            JnUITS Super Life
-          </Text>
-          <Text className="text-slate-400 text-sm text-center mt-2 leading-5">
-            Hard Alarm • 25m/5m Strict Lock • 3-Category Contact CRM
-          </Text>
-        </View>
-
-        <View className="bg-slate-800/80 border border-slate-700 rounded-3xl p-5 mb-8 gap-y-4">
-          <View className="flex-row items-center">
-            <View className="w-10 h-10 rounded-xl bg-rose-500/20 items-center justify-center mr-3.5">
-              <Ionicons name="lock-closed" size={20} color="#F43F5E" />
-            </View>
-            <View className="flex-1">
-              <Text className="text-white font-bold text-sm">
-                Strict Focus & 0–5 Emergency Pass
-              </Text>
-              <Text className="text-slate-400 text-xs mt-0.5">
-                টানা ৩ দিন (কমপক্ষে ৩০ মিনিট করে) লক পূর্ণ করলে +1 Pass
-              </Text>
-            </View>
-          </View>
-
-          <View className="flex-row items-center">
-            <View className="w-10 h-10 rounded-xl bg-emerald-500/20 items-center justify-center mr-3.5">
-              <Ionicons name="people" size={20} color="#34D399" />
-            </View>
-            <View className="flex-1">
-              <Text className="text-white font-bold text-sm">
-                ৩-ক্যাটাগরির কন্টাক্ট রিমাইন্ডার
-              </Text>
-              <Text className="text-slate-400 text-xs mt-0.5">
-                সন্ধ্যা ৭টায় এলোমেলো তারিখে নামসহ অটোমেটিক নোটিফিকেশন
-              </Text>
-            </View>
-          </View>
-        </View>
-
-        <TouchableOpacity
-          onPress={() => void handleNativeGoogleLogin()}
-          disabled={googleLoading}
-          activeOpacity={0.85}
-          className="bg-white py-4 px-5 rounded-2xl flex-row items-center justify-center shadow-lg"
+        <ScrollView
+          contentContainerStyle={{
+            flexGrow: 1,
+            justifyContent: "space-between",
+            paddingHorizontal: 24,
+            paddingVertical: 28,
+          }}
+          showsVerticalScrollIndicator={false}
         >
-          {googleLoading ? (
-            <ActivityIndicator color="#0f172a" />
-          ) : (
-            <>
-              <Image
-                source={{
-                  uri: "https://upload.wikimedia.org/wikipedia/commons/archive/c/c1/20230822192910%21Google_%22G%22_logo.svg",
-                }}
-                style={{ width: 22, height: 22 }}
-              />
-              <Text className="text-slate-900 text-base font-black ml-3">
-                Continue with Google
+          {/* Top Brand Badge */}
+          <View className="items-center mt-4">
+            <View className="bg-indigo-500/20 border border-indigo-400/30 px-4 py-1.5 rounded-full flex-row items-center mb-6">
+              <Ionicons name="sparkles" size={14} color="#818CF8" />
+              <Text
+                allowFontScaling={false}
+                className="text-indigo-200 font-bold text-xs ml-1.5 tracking-wider uppercase"
+              >
+                Productivity & Life OS
               </Text>
-            </>
-          )}
-        </TouchableOpacity>
+            </View>
 
-        <Text className="text-slate-500 text-xs text-center mt-5">
-          একবার Google দিয়ে লগইন করলে অফলাইনেও আপনার প্রোফাইল সচল থাকবে।
-        </Text>
-      </ScrollView>
-    </SafeAreaView>
+            <View className="w-24 h-24 rounded-[32px] bg-indigo-600/25 border-2 border-indigo-400/50 items-center justify-center mb-5 shadow-2xl">
+              <Ionicons name="shield-checkmark" size={50} color="#818CF8" />
+            </View>
+
+            <Text
+              allowFontScaling={false}
+              className="text-4xl font-black text-white text-center tracking-tight"
+            >
+              JnUITS Super Life
+            </Text>
+            <Text
+              allowFontScaling={false}
+              className="text-slate-300 text-xs text-center mt-2.5 px-4 leading-5"
+            >
+              আপনার ডিপ ফোকাস, ঘুমের রুটিন এবং প্রিয়জনদের সাথে যোগাযোগের স্মার্ট
+              সঙ্গী
+            </Text>
+          </View>
+
+          {/* Center Glassmorphism Feature Cards */}
+          <View className="bg-slate-900/85 border border-slate-700/80 rounded-[32px] p-5 my-6 gap-y-4">
+            <View className="flex-row items-center">
+              <View className="w-11 h-11 rounded-2xl bg-rose-500/20 border border-rose-500/30 items-center justify-center mr-3.5">
+                <Ionicons name="lock-closed" size={22} color="#F43F5E" />
+              </View>
+              <View className="flex-1">
+                <Text
+                  allowFontScaling={false}
+                  className="text-white font-bold text-sm"
+                >
+                  25m/5m Focus Lock & Shorts Blocker
+                </Text>
+                <Text
+                  allowFontScaling={false}
+                  className="text-slate-400 text-xs mt-0.5"
+                >
+                  টানা ৩ দিন (৩০+ মি.) লক পূর্ণ করলে +1 Emergency Pass
+                </Text>
+              </View>
+            </View>
+
+            <View className="flex-row items-center">
+              <View className="w-11 h-11 rounded-2xl bg-emerald-500/20 border border-emerald-500/30 items-center justify-center mr-3.5">
+                <Ionicons name="people" size={22} color="#34D399" />
+              </View>
+              <View className="flex-1">
+                <Text
+                  allowFontScaling={false}
+                  className="text-white font-bold text-sm"
+                >
+                  ৩-ক্যাটাগরির Smart Contact CRM
+                </Text>
+                <Text
+                  allowFontScaling={false}
+                  className="text-slate-400 text-xs mt-0.5"
+                >
+                  প্রতিদিন সন্ধ্যা ৭টায় এলোমেলো তারিখে নামসহ রিমাইন্ডার
+                </Text>
+              </View>
+            </View>
+
+            <View className="flex-row items-center">
+              <View className="w-11 h-11 rounded-2xl bg-violet-500/20 border border-violet-500/30 items-center justify-center mr-3.5">
+                <Ionicons name="alarm" size={22} color="#A78BFA" />
+              </View>
+              <View className="flex-1">
+                <Text
+                  allowFontScaling={false}
+                  className="text-white font-bold text-sm"
+                >
+                  90-Min Sleep Cycle & Hard Alarm
+                </Text>
+                <Text
+                  allowFontScaling={false}
+                  className="text-slate-400 text-xs mt-0.5"
+                >
+                  অংক সমাধান ছাড়া বন্ধ না হওয়া হার্ড অ্যালার্ম ও ক্লাউড ব্যাকআপ
+                </Text>
+              </View>
+            </View>
+          </View>
+
+          {/* Bottom Action Area */}
+          <View>
+            <TouchableOpacity
+              onPress={() => void handleNativeGoogleLogin()}
+              disabled={googleLoading}
+              activeOpacity={0.85}
+              className="bg-white py-4 px-6 rounded-2xl flex-row items-center justify-center shadow-xl"
+            >
+              {googleLoading ? (
+                <ActivityIndicator color="#0f172a" />
+              ) : (
+                <>
+                  <Image
+                    source={{
+                      uri: "https://upload.wikimedia.org/wikipedia/commons/archive/c/c1/20230822192910%21Google_%22G%22_logo.svg",
+                    }}
+                    style={{ width: 22, height: 22 }}
+                  />
+                  <Text
+                    allowFontScaling={false}
+                    className="text-slate-900 text-base font-black ml-3"
+                  >
+                    Continue with Google
+                  </Text>
+                </>
+              )}
+            </TouchableOpacity>
+
+            <View className="flex-row items-center justify-center mt-4">
+              <Ionicons name="cloud-done-outline" size={14} color="#64748B" />
+              <Text
+                allowFontScaling={false}
+                className="text-slate-400 text-[11px] text-center ml-1.5"
+              >
+                অটো ক্লাউড ব্যাকআপ • একবার লগইন করলে অফলাইনেও সচল থাকবে
+              </Text>
+            </View>
+          </View>
+        </ScrollView>
+      </SafeAreaView>
+    </ImageBackground>
   );
 }

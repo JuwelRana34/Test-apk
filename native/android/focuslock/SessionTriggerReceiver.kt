@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.PowerManager
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import java.util.Calendar
 
@@ -52,12 +53,14 @@ class SessionTriggerReceiver : BroadcastReceiver() {
                 }
 
                 val now = System.currentTimeMillis()
+                val nowRealtime = SystemClock.elapsedRealtime()
                 val plannedDuration = (endCalendar.timeInMillis - now).coerceAtLeast(0L)
 
                 prefs.edit()
                     .putBoolean("IS_SESSION_ACTIVE", true)
                     .putString("LOCK_MODE", lockMode)
                     .putLong("SESSION_START_TIME", now)
+                    .putLong("SESSION_START_REALTIME", nowRealtime)
                     .putLong("SESSION_END_TIME", endCalendar.timeInMillis)
                     .putLong("SESSION_PLANNED_DURATION", plannedDuration)
                     .commit()
@@ -115,18 +118,22 @@ class SessionTriggerReceiver : BroadcastReceiver() {
             } else if (action == "END_SESSION") {
                 val wasActive = prefs.getBoolean("IS_SESSION_ACTIVE", false)
                 val startTime = prefs.getLong("SESSION_START_TIME", 0L)
+                val startRealtime = prefs.getLong("SESSION_START_REALTIME", 0L)
                 val plannedDuration = prefs.getLong("SESSION_PLANNED_DURATION", 0L)
                 val now = System.currentTimeMillis()
-                val actualElapsed = if (startTime > 0L) (now - startTime) else plannedDuration
-                val completedDuration = minOf(
-                    if (plannedDuration > 0L) plannedDuration else actualElapsed,
-                    actualElapsed
-                )
+                val wallElapsed = if (startTime > 0L) (now - startTime) else plannedDuration
+                val hardwareElapsed = if (startRealtime > 0L) (SystemClock.elapsedRealtime() - startRealtime) else wallElapsed
+
+                var completedDuration = minOf(wallElapsed, hardwareElapsed)
+                if (plannedDuration > 0L) {
+                    completedDuration = minOf(completedDuration, plannedDuration)
+                }
 
                 prefs.edit()
                     .putBoolean("IS_SESSION_ACTIVE", false)
                     .remove("SESSION_END_TIME")
                     .remove("SESSION_START_TIME")
+                    .remove("SESSION_START_REALTIME")
                     .remove("SESSION_PLANNED_DURATION")
                     .commit()
 

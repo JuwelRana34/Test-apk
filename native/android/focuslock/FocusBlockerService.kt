@@ -12,15 +12,26 @@ import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.drawable.GradientDrawable
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
+import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
+import android.util.TypedValue
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
-import android.widget.Toast
+import android.widget.TextView
 import androidx.core.app.NotificationCompat
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -31,10 +42,10 @@ class FocusBlockerService : AccessibilityService() {
         const val ACTION_STOP_SESSION = "com.juwel522.myapp.STOP_FOCUS_SESSION"
         const val ACTION_REDIRECT_MAIN_APP = "com.juwel522.myapp.REDIRECT_MAIN_APP"
         const val ACTION_SYNC_STATE = "com.juwel522.myapp.SYNC_FOCUS_STATE"
+        const val ACTION_START_YT_TRACKER = "com.juwel522.myapp.START_YT_TRACKER"
         private const val CHANNEL_ID = "focus_mode"
         private const val NOTIFICATION_ID = 522
 
-        // Pomodoro cycle: 25 minutes strict lock + 5 minutes break = 30 minutes
         private const val POMODORO_FOCUS_MILLIS = 25 * 60 * 1000L
         private const val POMODORO_BREAK_MILLIS = 5 * 60 * 1000L
         private const val POMODORO_CYCLE_MILLIS = POMODORO_FOCUS_MILLIS + POMODORO_BREAK_MILLIS
@@ -43,16 +54,23 @@ class FocusBlockerService : AccessibilityService() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val ytHandler = Handler(Looper.getMainLooper())
     private val sessionTickHandler = Handler(Looper.getMainLooper())
+    private val bannerHandler = Handler(Looper.getMainLooper())
 
     private var isYtForeground = false
+    private var lastYtTickRealtime = 0L
     private var lastRedirectAt = 0L
-    private var lastToastAt = 0L
+    private var lastBannerAt = 0L
     private var foregroundStarted = false
     private var wasInBreakPhase = false
     private var breakWarningShownForCycle = -1L
 
     private var anchorOverlayView: View? = null
+    private var instantBannerView: TextView? = null
     private var windowManager: WindowManager? = null
+
+    private val hideBannerRunnable = Runnable {
+        removeInstantBanner()
+    }
 
     private val sessionReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -63,6 +81,12 @@ class FocusBlockerService : AccessibilityService() {
                     ensureForegroundNotification()
                     startSessionTicker()
                     redirectToMainActivity(force = true)
+                }
+                ACTION_START_YT_TRACKER -> {
+                    val prefs = getSharedPreferences("FocusModePrefs", Context.MODE_PRIVATE)
+                    if (prefs.getBoolean("IS_SESSION_ACTIVE", false)) {
+                        startYouTubeTracker(prefs)
+                    }
                 }
                 ACTION_SYNC_STATE -> {
                     ensureForegroundNotification()
@@ -83,6 +107,7 @@ class FocusBlockerService : AccessibilityService() {
         val filter = IntentFilter().apply {
             addAction(ACTION_STOP_SESSION)
             addAction(ACTION_REDIRECT_MAIN_APP)
+            addAction(ACTION_START_YT_TRACKER)
             addAction(ACTION_SYNC_STATE)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -98,7 +123,6 @@ class FocusBlockerService : AccessibilityService() {
         }
     }
 
-    // Reads allowed apps reliably from both CSV and StringSet so SharedPreferences caching never fails
     private fun getAllowedAppsSet(prefs: android.content.SharedPreferences): Set<String> {
         val result = HashSet<String>()
         val csv = prefs.getString("ALLOWED_APPS_CSV", "") ?: ""
@@ -113,6 +137,183 @@ class FocusBlockerService : AccessibilityService() {
             result.addAll(setVal)
         }
         return result
+    }
+
+    private fun getAllowedDomainsSet(prefs: android.content.SharedPreferences): Set<String> {
+        val result = LinkedHashSet<String>()
+        val csv = prefs.getString("ALLOWED_DOMAINS_CSV", "") ?: ""
+        if (csv.isNotEmpty()) {
+            csv.split(",").forEach { item ->
+                val clean = item.trim().lowercase()
+                if (clean.isNotEmpty() && !clean.contains("youtube.") && !clean.contains("youtu.be")) {
+                    result.add(clean)
+                }
+            }
+        }
+        val setVal = prefs.getStringSet("ALLOWED_DOMAINS", null)
+        if (setVal != null) {
+            setVal.forEach { d ->
+                val clean = d.trim().lowercase()
+                if (clean.isNotEmpty() && !clean.contains("youtube.") && !clean.contains("youtu.be")) {
+                    result.add(clean)
+                }
+            }
+        }
+        return result
+    }
+
+    // 🌟 0ms Instant Custom Overlay Banner (No Android Toast Queue Lag!)
+    private fun showInstantAlert(message: String) {
+        val now = System.currentTimeMillis()
+        if (now - lastBannerAt < 900L) return
+        lastBannerAt = now
+
+        triggerShortHaptic()
+
+        mainHandler.post {
+            try {
+                bannerHandler.removeCallbacks(hideBannerRunnable)
+                removeInstantBanner()
+
+                val tv = TextView(this).apply {
+                    text = message
+                    setTextColor(Color.WHITE)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                    gravity = Gravity.CENTER
+                    setPadding(44, 26, 44, 26)
+                    background = GradientDrawable().apply {
+                        shape = GradientDrawable.RECTANGLE
+                        cornerRadius = 48f
+                        setColor(Color.parseColor("#E61E293B"))
+                        setStroke(3, Color.parseColor("#F43F5E"))
+                    }
+                }
+
+                val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
+                } else {
+                    @Suppress("DEPRECATION")
+                    WindowManager.LayoutParams.TYPE_SYSTEM_ALERT
+                }
+
+                val params = WindowManager.LayoutParams(
+                    WindowManager.LayoutParams.WRAP_CONTENT,
+                    WindowManager.LayoutParams.WRAP_CONTENT,
+                    layoutType,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                    PixelFormat.TRANSLUCENT
+                ).apply {
+                    gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                    y = 180
+                }
+
+                windowManager?.addView(tv, params)
+                instantBannerView = tv
+                bannerHandler.postDelayed(hideBannerRunnable, 1800L)
+            } catch (_: Exception) {}
+        }
+    }
+
+    private fun removeInstantBanner() {
+        val v = instantBannerView ?: return
+        try {
+            windowManager?.removeView(v)
+        } catch (_: Exception) {}
+        instantBannerView = null
+    }
+
+    private fun triggerShortHaptic() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val vm = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
+                vm.defaultVibrator.vibrate(VibrationEffect.createOneShot(55, VibrationEffect.DEFAULT_AMPLITUDE))
+            } else {
+                @Suppress("DEPRECATION")
+                val vib = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    vib.vibrate(VibrationEffect.createOneShot(55, VibrationEffect.DEFAULT_AMPLITUDE))
+                } else {
+                    @Suppress("DEPRECATION")
+                    vib.vibrate(55)
+                }
+            }
+        } catch (_: Exception) {}
+    }
+
+    // 🌟 Universal Media & Picture-in-Picture (PiP) Stopper (Stops YouTube PiP, MX Player, VLC, PlayIt)
+    private fun stopAllBackgroundMediaAndPiP() {
+        try {
+            val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+
+            // 1. Send hardware Media Pause & Media Stop key events so active video players pause before PiP can trigger
+            val downPause = KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_PAUSE)
+            val upPause = KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MEDIA_PAUSE)
+            audioManager.dispatchMediaKeyEvent(downPause)
+            audioManager.dispatchMediaKeyEvent(upPause)
+
+            val downStop = KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_STOP)
+            val upStop = KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MEDIA_STOP)
+            audioManager.dispatchMediaKeyEvent(downStop)
+            audioManager.dispatchMediaKeyEvent(upStop)
+
+            // 2. Claim transient exclusive audio focus so any stubborn player (MX Player, YouTube, etc.) is forced to pause by Android OS
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val focusReq = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
+                    .setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
+                            .build()
+                    )
+                    .setOnAudioFocusChangeListener {}
+                    .build()
+                audioManager.requestAudioFocus(focusReq)
+                mainHandler.postDelayed({
+                    try {
+                        audioManager.abandonAudioFocusRequest(focusReq)
+                    } catch (_: Exception) {}
+                }, 1200L)
+            } else {
+                @Suppress("DEPRECATION")
+                audioManager.requestAudioFocus(
+                    null,
+                    AudioManager.STREAM_MUSIC,
+                    AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE
+                )
+            }
+        } catch (_: Exception) {}
+    }
+
+    // 🌟 Checks all interactive windows for disallowed Picture-in-Picture (PiP) floating video windows
+    private fun checkAndCloseDisallowedPiPWindows(
+        prefs: android.content.SharedPreferences,
+        allowedApps: Set<String>
+    ) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        try {
+            val windowList = windows ?: return
+            val usedMillis = prefs.getLong("YT_USED_MILLIS", 0L)
+            val limitMillis = prefs.getInt("YT_LIMIT_MINUTES", 90) * 60 * 1000L
+            val isYtExhausted = usedMillis >= limitMillis
+
+            for (win in windowList) {
+                if (win.isInPictureInPictureMode) {
+                    val winPkg = win.root?.packageName?.toString() ?: ""
+                    val isDisallowedPiP = winPkg.isEmpty() ||
+                        !allowedApps.contains(winPkg) ||
+                        (winPkg == "com.google.android.youtube" && isYtExhausted)
+
+                    if (isDisallowedPiP) {
+                        stopAllBackgroundMediaAndPiP()
+                        performGlobalAction(GLOBAL_ACTION_BACK)
+                        showInstantAlert("🚫 ভাসমান ভিডিও প্লেয়ার (PiP) ব্লক করা হয়েছে!")
+                        break
+                    }
+                }
+            }
+        } catch (_: Exception) {}
     }
 
     private fun ensureAnchorOverlay() {
@@ -185,7 +386,13 @@ class FocusBlockerService : AccessibilityService() {
                     return
                 }
 
+                val allowedApps = getAllowedAppsSet(prefs)
                 val inBreak = isCurrentlyInBreakPhase(prefs, now)
+
+                if (!inBreak) {
+                    checkAndCloseDisallowedPiPWindows(prefs, allowedApps)
+                }
+
                 if (inBreak) {
                     val startTime = prefs.getLong("SESSION_START_TIME", 0L)
                     val elapsed = now - startTime
@@ -195,27 +402,19 @@ class FocusBlockerService : AccessibilityService() {
 
                     if (remainingBreakMillis in 1..30000L && breakWarningShownForCycle != currentCycleIndex) {
                         breakWarningShownForCycle = currentCycleIndex
-                        Toast.makeText(
-                            applicationContext,
-                            "⏳ আর ৩০ সেকেন্ড পর আবার ২৫ মিনিটের ফোকাস লক শুরু হবে!",
-                            Toast.LENGTH_LONG
-                        ).show()
+                        showInstantAlert("⏳ আর ৩০ সেকেন্ড পর আবার ২৫ মিনিটের ফোকাস লক শুরু হবে!")
                     }
                     wasInBreakPhase = true
                 } else if (wasInBreakPhase) {
                     wasInBreakPhase = false
                     ensureForegroundNotification()
                     val currentPkg = rootInActiveWindow?.packageName?.toString() ?: ""
-                    val allowedApps = getAllowedAppsSet(prefs)
                     if (currentPkg.isNotEmpty() &&
                         currentPkg != applicationContext.packageName &&
                         !allowedApps.contains(currentPkg)
                     ) {
-                        Toast.makeText(
-                            applicationContext,
-                            "🔒 ৫ মিনিটের ব্রেক শেষ! আবার ২৫ মিনিটের ফোকাস লক শুরু হয়েছে।",
-                            Toast.LENGTH_SHORT
-                        ).show()
+                        stopAllBackgroundMediaAndPiP()
+                        showInstantAlert("🔒 ৫ মিনিটের ব্রেক শেষ! আবার ২৫ মিনিটের লক শুরু হয়েছে।")
                         redirectToMainActivity(force = true)
                     }
                 }
@@ -241,12 +440,18 @@ class FocusBlockerService : AccessibilityService() {
 
         ensureAnchorOverlay()
 
+        val allowedApps = getAllowedAppsSet(prefs)
+        val inBreak = isCurrentlyInBreakPhase(prefs, now)
+
+        if (!inBreak && eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED) {
+            checkAndCloseDisallowedPiPWindows(prefs, allowedApps)
+        }
+
         val rootNode = rootInActiveWindow
         val rootPackageName = rootNode?.packageName?.toString()
         val eventPackageName = event.packageName?.toString()
 
-        // 🌟 FIX: Status bar (com.android.systemui) fires TYPE_WINDOW_CONTENT_CHANGED every second
-        // for network speed (KB/s) and clock seconds! Ignore systemui unless user actually opened Recents/Overview!
+        // Ignore background status bar updates (network speed meter KB/s & clock seconds)
         if (eventPackageName == "com.android.systemui") {
             val className = event.className?.toString()?.lowercase() ?: ""
             val isRecentsOpened = eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
@@ -259,16 +464,14 @@ class FocusBlockerService : AccessibilityService() {
             }
         }
 
-        // Determine actual foreground package: prefer rootPackageName (the real active app window)
         val packageName = rootPackageName ?: eventPackageName ?: return
-
         val ownPackage = applicationContext.packageName
+
         if (packageName == ownPackage) {
             stopYouTubeTracker()
             return
         }
 
-        // Ignore keyboards, input methods, and system permission dialogs
         val lowerPkg = packageName.lowercase()
         if (lowerPkg.contains("inputmethod") ||
             lowerPkg.contains("keyboard") ||
@@ -281,8 +484,7 @@ class FocusBlockerService : AccessibilityService() {
             return
         }
 
-        // Check if we are in the 5-minute Pomodoro Break Phase
-        if (isCurrentlyInBreakPhase(prefs, now)) {
+        if (inBreak) {
             stopYouTubeTracker()
             if (packageName == "com.android.settings" && rootNode != null && isTamperingWithSettings(rootNode)) {
                 performGlobalAction(GLOBAL_ACTION_BACK)
@@ -291,22 +493,7 @@ class FocusBlockerService : AccessibilityService() {
             return
         }
 
-        val allowedApps = getAllowedAppsSet(prefs)
-
-        // 🌟 FIX: If user just tapped a whitelisted app inside our Lock Screen, allow smooth transition!
-        val lastLaunchedApp = prefs.getString("LAST_LAUNCHED_ALLOWED_APP", "") ?: ""
-        val graceUntil = prefs.getLong("WHITELIST_GRACE_UNTIL", 0L)
-        if (now < graceUntil && lastLaunchedApp.isNotEmpty()) {
-            if (packageName == lastLaunchedApp || eventPackageName == lastLaunchedApp) {
-                return
-            }
-            // Also ignore intermediate launcher frame during app-open animation
-            if (lowerPkg.contains("launcher") || lowerPkg.contains("systemui")) {
-                return
-            }
-        }
-
-        // 🌟 WHITELISTED APPS HANDLING (NEVER kick user back to Lock Screen when using an allowed app!)
+        // 🌟 WHITELISTED APPS CHECK FIRST (So YouTube timer starts from second 1 even during launch grace!)
         val isAllowedApp = allowedApps.contains(packageName) ||
             (eventPackageName != null && allowedApps.contains(eventPackageName))
 
@@ -322,10 +509,16 @@ class FocusBlockerService : AccessibilityService() {
 
                 if (usedMillis >= limitMillis) {
                     stopYouTubeTracker()
-                    showThrottledToast("⏳ আজকের YouTube লং ভিডিওর সময়সীমা ($limitMinutes মিনিট) শেষ!")
+                    // 🌟 Pause video & kill PiP BEFORE leaving YouTube so PiP mini-player never spawns!
+                    stopAllBackgroundMediaAndPiP()
+                    performGlobalAction(GLOBAL_ACTION_BACK)
+                    showInstantAlert("⏳ আজকের YouTube লং ভিডিওর সময়সীমা ($limitMinutes মিনিট) শেষ!")
                     redirectToMainActivity(force = true)
                     return
                 }
+
+                // Start ticking YouTube timer immediately from the very first second!
+                startYouTubeTracker(prefs)
 
                 var currentParent = event.source
                 var caughtShorts = false
@@ -339,57 +532,60 @@ class FocusBlockerService : AccessibilityService() {
 
                 if (caughtShorts || (rootNode != null && containsShortsContent(rootNode))) {
                     performGlobalAction(GLOBAL_ACTION_BACK)
-                    showThrottledToast("🚫 Focus Mode চলাকালীন YouTube Shorts ব্লক করা আছে!")
+                    showInstantAlert("🚫 Focus Mode: YouTube Shorts ব্লক করা আছে!")
                     return
                 }
 
-                startYouTubeTracker(prefs)
                 return
             }
 
-            // 2. Chrome & Browser Allowed Websites Filter
+            // 2. Chrome & Browser Allowed Websites Filter (Max 5 Sites + Block YouTube in Chrome)
             if (activeAllowedPkg == "com.android.chrome" ||
                 activeAllowedPkg == "com.brave.browser" ||
                 activeAllowedPkg == "com.sec.android.app.sbrowser"
             ) {
                 stopYouTubeTracker()
-                val allowedDomains = prefs.getStringSet("ALLOWED_DOMAINS", emptySet()) ?: emptySet()
-                if (allowedDomains.isNotEmpty() && rootNode != null) {
+                val allowedDomains = getAllowedDomainsSet(prefs)
+                if (rootNode != null) {
                     checkBrowserUrlAndBlock(rootNode, activeAllowedPkg, allowedDomains)
                 }
                 return
             }
 
-            // 3. Instagram / Facebook Reels Blocker (if whitelisted)
+            // 3. Instagram / Facebook Reels Blocker
             if (activeAllowedPkg == "com.instagram.android" || activeAllowedPkg == "com.facebook.katana") {
                 stopYouTubeTracker()
                 if (rootNode != null && containsShortsContent(rootNode)) {
                     performGlobalAction(GLOBAL_ACTION_BACK)
-                    showThrottledToast("🚫 Focus Mode চলাকালীন Reels ব্লক করা আছে!")
+                    showInstantAlert("🚫 Focus Mode: Reels ব্লক করা আছে!")
                 }
                 return
             }
 
-            // 4. All other whitelisted apps: let them run 100% freely!
             stopYouTubeTracker()
             return
         }
 
-        // =====================================================================
-        // NON-WHITELISTED APP OR HOME LAUNCHER OR RECENTS
-        // Only trigger redirect on actual window state transitions so background
-        // system events never falsely pull the user out of a whitelisted app!
-        // =====================================================================
+        // Launch grace check for intermediate launcher frames when opening a whitelisted app
+        val lastLaunchedApp = prefs.getString("LAST_LAUNCHED_ALLOWED_APP", "") ?: ""
+        val graceUntil = prefs.getLong("WHITELIST_GRACE_UNTIL", 0L)
+        if (now < graceUntil && lastLaunchedApp.isNotEmpty()) {
+            if (lowerPkg.contains("launcher") || lowerPkg.contains("systemui")) {
+                return
+            }
+        }
+
         val isWindowTransition = eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
             eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED
         if (!isWindowTransition) return
 
-        // Double-check rootInActiveWindow: if the foreground window is still an allowed app or our app, do NOT redirect!
         if (rootPackageName != null && (rootPackageName == ownPackage || allowedApps.contains(rootPackageName))) {
             return
         }
 
         stopYouTubeTracker()
+        // Stop any video/audio from non-whitelisted media players (e.g., MX Player, VLC) so they can't enter PiP!
+        stopAllBackgroundMediaAndPiP()
 
         val className = event.className?.toString()?.lowercase() ?: ""
         if (lowerPkg.contains("systemui") ||
@@ -437,6 +633,16 @@ class FocusBlockerService : AccessibilityService() {
             return
         }
 
+        // 🌟 Strictly block YouTube inside Chrome so user cannot bypass YouTube app rules!
+        if (rawText.contains("youtube.com") || rawText.contains("youtu.be")) {
+            stopAllBackgroundMediaAndPiP()
+            redirectChromeToSafeSite(packageName, allowedDomains)
+            showInstantAlert("🚫 Chrome-এ YouTube চালানো নিষিদ্ধ! YouTube অ্যাপ ব্যবহার করুন।")
+            return
+        }
+
+        if (allowedDomains.isEmpty()) return
+
         val isAllowed = allowedDomains.any { domain ->
             val cleanDomain = domain.trim().lowercase()
                 .removePrefix("https://")
@@ -447,8 +653,23 @@ class FocusBlockerService : AccessibilityService() {
         }
 
         if (!isAllowed) {
+            redirectChromeToSafeSite(packageName, allowedDomains)
+            showInstantAlert("🚫 শুধু আপনার সিলেক্ট করা ৫টি ওয়েবসাইট চালানো যাবে!")
+        }
+    }
+
+    // Redirects current Chrome tab to the user's first allowed website instead of kicking them out of Chrome
+    private fun redirectChromeToSafeSite(packageName: String, allowedDomains: Set<String>) {
+        val firstAllowed = allowedDomains.firstOrNull() ?: "www.google.com"
+        val safeUrl = if (firstAllowed.startsWith("http")) firstAllowed else "https://$firstAllowed"
+        try {
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(safeUrl)).apply {
+                setPackage(packageName)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(intent)
+        } catch (_: Exception) {
             performGlobalAction(GLOBAL_ACTION_BACK)
-            showThrottledToast("🚫 Chrome-এ শুধুমাত্র আপনার সিলেক্ট করা ওয়েবসাইট চালানো যাবে!")
         }
     }
 
@@ -456,15 +677,6 @@ class FocusBlockerService : AccessibilityService() {
         val textMatches = rootNode.findAccessibilityNodeInfosByText("Jnuits")
         if (!textMatches.isNullOrEmpty()) return true
         return false
-    }
-
-    private fun showThrottledToast(message: String) {
-        val now = System.currentTimeMillis()
-        if (now - lastToastAt < 2500L) return
-        lastToastAt = now
-        mainHandler.post {
-            Toast.makeText(applicationContext, message, Toast.LENGTH_SHORT).show()
-        }
     }
 
     private fun redirectToMainActivity(force: Boolean) {
@@ -504,30 +716,54 @@ class FocusBlockerService : AccessibilityService() {
             prefs.edit()
                 .putString("YT_USAGE_DATE", todayStr)
                 .putLong("YT_USED_MILLIS", 0L)
-                .apply()
+                .commit()
         }
     }
 
+    // 🌟 Accurate Monotonic YouTube Timer (Starts from second 1 & commits every second!)
     private fun startYouTubeTracker(prefs: android.content.SharedPreferences) {
         if (isYtForeground) return
         isYtForeground = true
-        ytHandler.post(object : Runnable {
+        lastYtTickRealtime = SystemClock.elapsedRealtime()
+        ytHandler.removeCallbacksAndMessages(null)
+        ytHandler.postDelayed(object : Runnable {
             override fun run() {
                 if (!isYtForeground) return
+
+                // Verify YouTube is still the active window (or in grace window)
+                val currentRootPkg = rootInActiveWindow?.packageName?.toString() ?: ""
+                val graceUntil = prefs.getLong("WHITELIST_GRACE_UNTIL", 0L)
+                if (currentRootPkg.isNotEmpty() &&
+                    currentRootPkg != "com.google.android.youtube" &&
+                    System.currentTimeMillis() > graceUntil &&
+                    !currentRootPkg.contains("inputmethod") &&
+                    !currentRootPkg.contains("keyboard")
+                ) {
+                    stopYouTubeTracker()
+                    return
+                }
+
                 resetDailyYouTubeQuotaIfNeeded(prefs)
-                val usedMillis = prefs.getLong("YT_USED_MILLIS", 0L) + 1000L
-                prefs.edit().putLong("YT_USED_MILLIS", usedMillis).apply()
+                val nowRealtime = SystemClock.elapsedRealtime()
+                val delta = (nowRealtime - lastYtTickRealtime).coerceIn(500L, 2500L)
+                lastYtTickRealtime = nowRealtime
+
+                val usedMillis = prefs.getLong("YT_USED_MILLIS", 0L) + delta
+                prefs.edit().putLong("YT_USED_MILLIS", usedMillis).commit()
+
                 val limitMinutes = prefs.getInt("YT_LIMIT_MINUTES", 90)
                 val limitMillis = limitMinutes * 60 * 1000L
                 if (usedMillis >= limitMillis) {
                     stopYouTubeTracker()
-                    showThrottledToast("⏳ আজকের YouTube লং ভিডিওর সময়সীমা শেষ!")
+                    stopAllBackgroundMediaAndPiP()
+                    performGlobalAction(GLOBAL_ACTION_BACK)
+                    showInstantAlert("⏳ আজকের YouTube লং ভিডিওর সময়সীমা শেষ!")
                     redirectToMainActivity(force = true)
                     return
                 }
                 ytHandler.postDelayed(this, 1000L)
             }
-        })
+        }, 1000L)
     }
 
     private fun stopYouTubeTracker() {
@@ -540,19 +776,29 @@ class FocusBlockerService : AccessibilityService() {
         sessionTickHandler.removeCallbacksAndMessages(null)
         stopYouTubeTracker()
         removeAnchorOverlay()
+        removeInstantBanner()
 
         val prefs = getSharedPreferences("FocusModePrefs", Context.MODE_PRIVATE)
         val wasActive = prefs.getBoolean("IS_SESSION_ACTIVE", false)
         val startTime = prefs.getLong("SESSION_START_TIME", 0L)
+        val startRealtime = prefs.getLong("SESSION_START_REALTIME", 0L)
         val plannedDuration = prefs.getLong("SESSION_PLANNED_DURATION", 0L)
+
         val now = System.currentTimeMillis()
-        val actualElapsed = if (startTime > 0L) (now - startTime) else plannedDuration
-        val completedDuration = if (plannedDuration > 0L) minOf(plannedDuration, actualElapsed) else actualElapsed
+        val wallElapsed = if (startTime > 0L) (now - startTime) else plannedDuration
+        val hardwareElapsed = if (startRealtime > 0L) (SystemClock.elapsedRealtime() - startRealtime) else wallElapsed
+
+        // Anti-Cheat: take minimum of wall clock, hardware monotonic clock, and planned duration!
+        var completedDuration = minOf(wallElapsed, hardwareElapsed)
+        if (plannedDuration > 0L) {
+            completedDuration = minOf(completedDuration, plannedDuration)
+        }
 
         prefs.edit()
             .putBoolean("IS_SESSION_ACTIVE", false)
             .remove("SESSION_END_TIME")
             .remove("SESSION_START_TIME")
+            .remove("SESSION_START_REALTIME")
             .remove("SESSION_PLANNED_DURATION")
             .commit()
 
@@ -674,8 +920,10 @@ class FocusBlockerService : AccessibilityService() {
     override fun onDestroy() {
         mainHandler.removeCallbacksAndMessages(null)
         sessionTickHandler.removeCallbacksAndMessages(null)
+        bannerHandler.removeCallbacksAndMessages(null)
         stopYouTubeTracker()
         removeAnchorOverlay()
+        removeInstantBanner()
         try {
             unregisterReceiver(sessionReceiver)
         } catch (_: Exception) {}

@@ -15,6 +15,7 @@ import android.graphics.drawable.Drawable
 import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
+import android.os.SystemClock
 import android.provider.Settings
 import android.text.TextUtils
 import android.util.Base64
@@ -35,13 +36,25 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
     }
 
     private fun saveAllowedAppsToPrefs(prefs: android.content.SharedPreferences, pkgSet: Set<String>) {
-        // Save as both CSV string and fresh StringSet so Android SharedPreferences never caches stale sets!
-        prefs.edit()
-            .remove("ALLOWED_APPS")
-            .apply()
+        prefs.edit().remove("ALLOWED_APPS").apply()
         prefs.edit()
             .putStringSet("ALLOWED_APPS", HashSet(pkgSet))
             .putString("ALLOWED_APPS_CSV", pkgSet.joinToString(","))
+            .commit()
+    }
+
+    private fun saveAllowedDomainsToPrefs(prefs: android.content.SharedPreferences, domainList: List<String>) {
+        // Max 5 sites & strictly filter out YouTube domains
+        val cleanList = domainList
+            .map { it.trim().lowercase().removePrefix("https://").removePrefix("http://").removePrefix("www.").trimEnd('/') }
+            .filter { it.isNotEmpty() && !it.contains("youtube.") && !it.contains("youtu.be") }
+            .distinct()
+            .take(5)
+
+        prefs.edit().remove("ALLOWED_DOMAINS").apply()
+        prefs.edit()
+            .putStringSet("ALLOWED_DOMAINS", HashSet(cleanList))
+            .putString("ALLOWED_DOMAINS_CSV", cleanList.joinToString(","))
             .commit()
     }
 
@@ -249,18 +262,13 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
     @ReactMethod
     fun saveAllowedDomains(domains: ReadableArray, promise: Promise) {
         try {
-            val domainSet = HashSet<String>()
+            val list = ArrayList<String>()
             for (i in 0 until domains.size()) {
                 val d = domains.getString(i)?.trim()?.lowercase()
-                if (!d.isNullOrEmpty()) domainSet.add(d)
+                if (!d.isNullOrEmpty()) list.add(d)
             }
             val prefs = reactApplicationContext.getSharedPreferences("FocusModePrefs", Context.MODE_PRIVATE)
-            prefs.edit()
-                .remove("ALLOWED_DOMAINS")
-                .apply()
-            prefs.edit()
-                .putStringSet("ALLOWED_DOMAINS", domainSet)
-                .commit()
+            saveAllowedDomainsToPrefs(prefs, list)
             promise.resolve(true)
         } catch (e: Exception) {
             promise.reject("ERROR", e.message)
@@ -278,13 +286,52 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
         }
     }
 
+    // 🌟 Opens a specific whitelisted website directly inside Google Chrome so old blocked tabs never kick the user out!
+    @ReactMethod
+    fun openUrlInChrome(domainOrUrl: String, promise: Promise) {
+        try {
+            val clean = domainOrUrl.trim().lowercase()
+                .removePrefix("https://")
+                .removePrefix("http://")
+            val fullUrl = "https://$clean"
+            val chromePkg = "com.android.chrome"
+
+            val prefs = reactApplicationContext.getSharedPreferences("FocusModePrefs", Context.MODE_PRIVATE)
+            val existingCsv = prefs.getString("ALLOWED_APPS_CSV", "") ?: ""
+            val updatedSet = existingCsv.split(",").map { it.trim() }.filter { it.isNotEmpty() }.toMutableSet()
+            updatedSet.add(chromePkg)
+
+            prefs.edit()
+                .putString("LAST_LAUNCHED_ALLOWED_APP", chromePkg)
+                .putLong("WHITELIST_GRACE_UNTIL", System.currentTimeMillis() + 2500L)
+                .putString("ALLOWED_APPS_CSV", updatedSet.joinToString(","))
+                .putStringSet("ALLOWED_APPS", HashSet(updatedSet))
+                .commit()
+
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(fullUrl)).apply {
+                setPackage(chromePkg)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            try {
+                reactApplicationContext.startActivity(intent)
+            } catch (_: Exception) {
+                val fallbackIntent = Intent(Intent.ACTION_VIEW, Uri.parse(fullUrl)).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                reactApplicationContext.startActivity(fallbackIntent)
+            }
+            promise.resolve(true)
+        } catch (e: Exception) {
+            promise.reject("OPEN_URL_ERROR", e.message)
+        }
+    }
+
     @ReactMethod
     fun openApp(packageName: String, promise: Promise) {
         try {
             val cleanPkg = packageName.trim()
             val prefs = reactApplicationContext.getSharedPreferences("FocusModePrefs", Context.MODE_PRIVATE)
 
-            // 🌟 Ensure the opened app is registered in ALLOWED_APPS_CSV and set a 2.5s launch grace period!
             val existingCsv = prefs.getString("ALLOWED_APPS_CSV", "") ?: ""
             val updatedSet = existingCsv.split(",").map { it.trim() }.filter { it.isNotEmpty() }.toMutableSet()
             updatedSet.add(cleanPkg)
@@ -295,6 +342,24 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
                 .putString("ALLOWED_APPS_CSV", updatedSet.joinToString(","))
                 .putStringSet("ALLOWED_APPS", HashSet(updatedSet))
                 .commit()
+
+            // 🌟 If opening YouTube, immediately start the YouTube timer from second 1!
+            if (cleanPkg == "com.google.android.youtube") {
+                reactApplicationContext.sendBroadcast(
+                    Intent(FocusBlockerService.ACTION_START_YT_TRACKER)
+                        .setPackage(reactApplicationContext.packageName)
+                )
+            }
+
+            // 🌟 If opening Chrome via its app icon, open the first allowed website so an old blocked tab doesn't kick user out!
+            if (cleanPkg == "com.android.chrome") {
+                val domainsCsv = prefs.getString("ALLOWED_DOMAINS_CSV", "") ?: ""
+                val firstDomain = domainsCsv.split(",").map { it.trim() }.firstOrNull { it.isNotEmpty() }
+                if (!firstDomain.isNullOrEmpty()) {
+                    openUrlInChrome(firstDomain, promise)
+                    return
+                }
+            }
 
             val pm = reactApplicationContext.packageManager
             val intent = pm.getLaunchIntentForPackage(cleanPkg)
@@ -328,6 +393,7 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
 
             val prefs = reactApplicationContext.getSharedPreferences("FocusModePrefs", Context.MODE_PRIVATE)
             val now = System.currentTimeMillis()
+            val nowRealtime = SystemClock.elapsedRealtime()
             val sessionEndTime = now + (durationMinutes * 60 * 1000L)
 
             saveAllowedAppsToPrefs(prefs, pkgSet)
@@ -338,6 +404,7 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
                 putBoolean("POMODORO_ENABLED", pomodoroEnabled)
                 putInt("YT_LIMIT_MINUTES", ytLimitMinutes)
                 putLong("SESSION_START_TIME", now)
+                putLong("SESSION_START_REALTIME", nowRealtime)
                 putLong("SESSION_END_TIME", sessionEndTime)
                 putLong("SESSION_PLANNED_DURATION", durationMinutes * 60 * 1000L)
             }.commit()
@@ -483,11 +550,17 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
                 }
             }
 
-            val emergencyPasses = prefs.getInt("EMERGENCY_PASSES", 0).coerceIn(0, 5)
+            val totalEarned = prefs.getInt("TOTAL_PASSES_EARNED", prefs.getInt("EMERGENCY_PASSES", 0))
+            val totalUsed = prefs.getInt("TOTAL_PASSES_USED", 0)
+            val emergencyPasses = (totalEarned - totalUsed).coerceIn(0, 5)
             val streakDays = prefs.getInt("STREAK_DAYS", 0).coerceIn(0, 3)
             val totalCompleted = prefs.getInt("TOTAL_COMPLETED_SESSIONS", 0)
-            val ytUsedMinutes = (prefs.getLong("YT_USED_MILLIS", 0L) / 60000L).toInt()
+
+            val ytUsedMillis = prefs.getLong("YT_USED_MILLIS", 0L)
+            val ytUsedSeconds = (ytUsedMillis / 1000L).toInt()
+            val ytUsedMinutes = (ytUsedMillis / 60000L).toInt()
             val ytLimitMinutes = prefs.getInt("YT_LIMIT_MINUTES", 90)
+            val lastCompletedDate = prefs.getString("LAST_COMPLETED_DATE", "") ?: ""
 
             val map = WritableNativeMap().apply {
                 putBoolean("active", active && endTimeMillis > now)
@@ -498,11 +571,14 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
                 putBoolean("isBreakActive", isBreakActive)
                 putDouble("cycleRemainingMillis", cycleRemainingMillis.toDouble())
                 putInt("emergencyPasses", emergencyPasses)
+                putInt("totalPassesEarned", totalEarned)
+                putInt("totalPassesUsed", totalUsed)
                 putInt("streakDays", streakDays)
                 putInt("totalCompleted", totalCompleted)
+                putInt("ytUsedSeconds", ytUsedSeconds)
                 putInt("ytUsedMinutes", ytUsedMinutes)
                 putInt("ytLimitMinutes", ytLimitMinutes)
-                putString("lastCompletedDate", prefs.getString("LAST_COMPLETED_DATE", "") ?: "")
+                putString("lastCompletedDate", lastCompletedDate)
             }
             promise.resolve(map)
         } catch (e: Exception) {
@@ -514,20 +590,28 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
     fun useEmergencyPass(promise: Promise) {
         try {
             val prefs = reactApplicationContext.getSharedPreferences("FocusModePrefs", Context.MODE_PRIVATE)
-            val currentPasses = prefs.getInt("EMERGENCY_PASSES", 0).coerceIn(0, 5)
+            val totalEarned = prefs.getInt("TOTAL_PASSES_EARNED", prefs.getInt("EMERGENCY_PASSES", 0))
+            val totalUsed = prefs.getInt("TOTAL_PASSES_USED", 0)
+            val currentPasses = (totalEarned - totalUsed).coerceIn(0, 5)
 
             if (currentPasses <= 0) {
                 promise.resolve(false)
                 return
             }
 
-            val newPasses = (currentPasses - 1).coerceAtLeast(0)
+            val nextUsed = totalUsed + 1
+            val newPasses = (totalEarned - nextUsed).coerceIn(0, 5)
+
             prefs.edit()
+                .putInt("TOTAL_PASSES_EARNED", totalEarned)
+                .putInt("TOTAL_PASSES_USED", nextUsed)
                 .putInt("EMERGENCY_PASSES", newPasses)
                 .putInt("STREAK_DAYS", 0)
                 .putBoolean("IS_SESSION_ACTIVE", false)
                 .remove("SESSION_END_TIME")
                 .remove("SESSION_START_TIME")
+                .remove("SESSION_START_REALTIME")
+                .remove("SESSION_PLANNED_DURATION")
                 .commit()
 
             FocusScheduler.cancelSessionAlarms(reactApplicationContext)
@@ -542,17 +626,48 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
         }
     }
 
+    // 🌟 Anti-Cheat Cloud Merge: Never overwrites newer local pass/streak with stale cloud values!
     @ReactMethod
-    fun syncPassAndStreakFromCloud(passes: Int, streakDays: Int, lastDate: String, promise: Promise) {
+    fun syncPassAndStreakFromCloud(
+        cloudPasses: Int,
+        cloudStreakDays: Int,
+        cloudLastDate: String,
+        cloudEarned: Int,
+        cloudUsed: Int,
+        promise: Promise
+    ) {
         try {
             val prefs = reactApplicationContext.getSharedPreferences("FocusModePrefs", Context.MODE_PRIVATE)
-            val editor = prefs.edit()
-                .putInt("EMERGENCY_PASSES", passes.coerceIn(0, 5))
-                .putInt("STREAK_DAYS", streakDays.coerceIn(0, 2))
-            if (lastDate.isNotEmpty()) {
-                editor.putString("LAST_COMPLETED_DATE", lastDate)
+            val localEarned = prefs.getInt("TOTAL_PASSES_EARNED", prefs.getInt("EMERGENCY_PASSES", 0))
+            val localUsed = prefs.getInt("TOTAL_PASSES_USED", 0)
+            val localStreak = prefs.getInt("STREAK_DAYS", 0)
+            val localLastDate = prefs.getString("LAST_COMPLETED_DATE", "") ?: ""
+
+            // Merge Earned & Used monotonically (highest wins so earned passes are never lost and spent passes never come back!)
+            val effectiveCloudEarned = if (cloudEarned > 0) cloudEarned else cloudPasses + cloudUsed
+            val mergedEarned = maxOf(localEarned, effectiveCloudEarned)
+            val mergedUsed = maxOf(localUsed, cloudUsed)
+            val mergedPasses = (mergedEarned - mergedUsed).coerceIn(0, 5)
+
+            // Keep whichever streak belongs to the more recent date
+            val mergedLastDate: String
+            val mergedStreak: Int
+            if (localLastDate >= cloudLastDate && localLastDate.isNotEmpty()) {
+                mergedLastDate = localLastDate
+                mergedStreak = if (localLastDate == cloudLastDate) maxOf(localStreak, cloudStreakDays) else localStreak
+            } else {
+                mergedLastDate = cloudLastDate
+                mergedStreak = cloudStreakDays
             }
-            editor.commit()
+
+            prefs.edit()
+                .putInt("TOTAL_PASSES_EARNED", mergedEarned)
+                .putInt("TOTAL_PASSES_USED", mergedUsed)
+                .putInt("EMERGENCY_PASSES", mergedPasses)
+                .putInt("STREAK_DAYS", mergedStreak.coerceIn(0, 2))
+                .putString("LAST_COMPLETED_DATE", mergedLastDate)
+                .commit()
+
             promise.resolve(true)
         } catch (e: Exception) {
             promise.reject("SYNC_ERROR", e.message)

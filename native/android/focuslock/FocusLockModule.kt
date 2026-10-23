@@ -24,7 +24,10 @@ import com.facebook.react.bridge.*
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.HashSet
+import java.util.Locale
 
 class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaModule(reactContext) {
 
@@ -307,15 +310,10 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
         }
     }
 
-    // 🌟 Opens a selected .pdf file directly in News Plus PDF Viewer / Google Drive PDF Viewer!
+    // Opens a selected .pdf file directly in News Plus PDF Viewer / Google Drive PDF Viewer without any delayed Home/Recents grace timer!
     @ReactMethod
     fun openPdfUri(uriString: String, promise: Promise) {
         try {
-            val prefs = reactApplicationContext.getSharedPreferences("FocusModePrefs", Context.MODE_PRIVATE)
-            prefs.edit()
-                .putLong("PDF_OPEN_GRACE_UNTIL", System.currentTimeMillis() + 15000L)
-                .commit()
-
             val parsedUri = if (uriString.startsWith("file://")) {
                 val file = File(Uri.parse(uriString).path ?: "")
                 FileProvider.getUriForFile(
@@ -361,7 +359,7 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
 
             prefs.edit()
                 .putString("LAST_LAUNCHED_ALLOWED_APP", chromePkg)
-                .putLong("WHITELIST_GRACE_UNTIL", System.currentTimeMillis() + 2500L)
+                .putLong("WHITELIST_GRACE_UNTIL", System.currentTimeMillis() + 1200L)
                 .putString("ALLOWED_APPS_CSV", updatedSet.joinToString(","))
                 .putStringSet("ALLOWED_APPS", HashSet(updatedSet))
                 .commit()
@@ -396,7 +394,7 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
 
             prefs.edit()
                 .putString("LAST_LAUNCHED_ALLOWED_APP", cleanPkg)
-                .putLong("WHITELIST_GRACE_UNTIL", System.currentTimeMillis() + 2500L)
+                .putLong("WHITELIST_GRACE_UNTIL", System.currentTimeMillis() + 1200L)
                 .putString("ALLOWED_APPS_CSV", updatedSet.joinToString(","))
                 .putStringSet("ALLOWED_APPS", HashSet(updatedSet))
                 .commit()
@@ -440,7 +438,7 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
         promise: Promise
     ) {
         try {
-            // 🌟 Enforce Max 6 Hours (360 minutes) Safety Cap for Session Lock!
+            // Enforce Max 6 Hours (360 minutes) Safety Cap for Session Lock!
             val safeDurationMinutes = durationMinutes.coerceIn(1, MAX_SESSION_MINUTES)
 
             val pkgSet = HashSet<String>()
@@ -593,25 +591,36 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
 
             var isBreakActive = false
             var cycleRemainingMillis = 0L
+            var noMoreBreaks = false
 
             if (active && endTimeMillis > now) {
+                val totalRemainingMillis = endTimeMillis - now
                 val useCycle = (lockMode == "SESSION" && pomodoroEnabled) ||
                     (lockMode == "SCHEDULE" && scheduleBreakEnabled)
 
-                if (useCycle && startTimeMillis > 0L && now > startTimeMillis) {
+                if (useCycle && startTimeMillis > 0L && now >= startTimeMillis) {
                     val focusMillis = if (lockMode == "SCHEDULE") SCHEDULE_FOCUS_MILLIS else SESSION_FOCUS_MILLIS
                     val cycleMillis = if (lockMode == "SCHEDULE") SCHEDULE_CYCLE_MILLIS else SESSION_CYCLE_MILLIS
                     val elapsed = now - startTimeMillis
                     val cyclePos = elapsed % cycleMillis
                     if (cyclePos >= focusMillis) {
                         isBreakActive = true
-                        cycleRemainingMillis = cycleMillis - cyclePos
+                        cycleRemainingMillis = minOf(cycleMillis - cyclePos, totalRemainingMillis)
                     } else {
                         isBreakActive = false
-                        cycleRemainingMillis = focusMillis - cyclePos
+                        val timeUntilNextBreak = focusMillis - cyclePos
+                        if (totalRemainingMillis <= timeUntilNextBreak) {
+                            // The lock will finish before the next break ever starts!
+                            cycleRemainingMillis = totalRemainingMillis
+                            noMoreBreaks = true
+                        } else {
+                            cycleRemainingMillis = timeUntilNextBreak
+                            noMoreBreaks = false
+                        }
                     }
                 } else {
-                    cycleRemainingMillis = endTimeMillis - now
+                    cycleRemainingMillis = totalRemainingMillis
+                    noMoreBreaks = true
                 }
             }
 
@@ -621,7 +630,15 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
             val streakDays = prefs.getInt("STREAK_DAYS", 0).coerceIn(0, 3)
             val totalCompleted = prefs.getInt("TOTAL_COMPLETED_SESSIONS", 0)
 
-            val ytUsedMillis = prefs.getLong("YT_USED_MILLIS", 0L)
+            // Reset daily YT usage if date rolled over
+            val todayStr = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+            val savedYtDate = prefs.getString("YT_USAGE_DATE", "") ?: ""
+            val ytUsedMillis = if (savedYtDate == todayStr) {
+                prefs.getLong("YT_USED_MILLIS", 0L)
+            } else {
+                0L
+            }
+
             val ytUsedSeconds = (ytUsedMillis / 1000L).toInt()
             val ytUsedMinutes = (ytUsedMillis / 60000L).toInt()
             val ytLimitMinutes = prefs.getInt("YT_LIMIT_MINUTES", 90)
@@ -636,6 +653,7 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
                 putBoolean("pomodoroEnabled", pomodoroEnabled)
                 putBoolean("scheduleBreakEnabled", scheduleBreakEnabled)
                 putBoolean("isBreakActive", isBreakActive)
+                putBoolean("noMoreBreaks", noMoreBreaks)
                 putDouble("cycleRemainingMillis", cycleRemainingMillis.toDouble())
                 putInt("emergencyPasses", emergencyPasses)
                 putInt("totalPassesEarned", totalEarned)
@@ -645,6 +663,7 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
                 putInt("ytUsedSeconds", ytUsedSeconds)
                 putInt("ytUsedMinutes", ytUsedMinutes)
                 putInt("ytLimitMinutes", ytLimitMinutes)
+                putString("ytUsageDate", todayStr)
                 putString("lastCompletedDate", lastCompletedDate)
                 putString("completedHistoryJson", completedHistoryJson)
             }
@@ -702,6 +721,9 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
         cloudEarned: Int,
         cloudUsed: Int,
         cloudHistoryJson: String,
+        cloudTotalCompleted: Int,
+        cloudYtUsageDate: String,
+        cloudYtUsedSeconds: Int,
         promise: Promise
     ) {
         try {
@@ -711,6 +733,7 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
             val localStreak = prefs.getInt("STREAK_DAYS", 0)
             val localLastDate = prefs.getString("LAST_COMPLETED_DATE", "") ?: ""
             val localHistoryStr = prefs.getString("COMPLETED_HISTORY_JSON", "{}") ?: "{}"
+            val localCompleted = prefs.getInt("TOTAL_COMPLETED_SESSIONS", 0)
 
             val effectiveCloudEarned = if (cloudEarned > 0) cloudEarned else cloudPasses + cloudUsed
             val mergedEarned = maxOf(localEarned, effectiveCloudEarned)
@@ -750,13 +773,26 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
                 }
             } catch (_: Exception) {}
 
+            // Merge totalCompleted sessions monotonically (also at least the number of completed history days!)
+            val mergedTotalCompleted = maxOf(localCompleted, cloudTotalCompleted, mergedHistory.length())
+
+            // Anti-Cheat Daily YouTube Usage Merge: Restore today's YT used seconds if cloud has higher value for today!
+            val todayStr = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+            val localYtDate = prefs.getString("YT_USAGE_DATE", "") ?: ""
+            val localYtMillis = if (localYtDate == todayStr) prefs.getLong("YT_USED_MILLIS", 0L) else 0L
+            val cloudYtMillis = if (cloudYtUsageDate == todayStr) (cloudYtUsedSeconds.toLong() * 1000L) else 0L
+            val mergedYtMillis = maxOf(localYtMillis, cloudYtMillis)
+
             prefs.edit()
                 .putInt("TOTAL_PASSES_EARNED", mergedEarned)
                 .putInt("TOTAL_PASSES_USED", mergedUsed)
                 .putInt("EMERGENCY_PASSES", mergedPasses)
                 .putInt("STREAK_DAYS", mergedStreak.coerceIn(0, 2))
+                .putInt("TOTAL_COMPLETED_SESSIONS", mergedTotalCompleted)
                 .putString("LAST_COMPLETED_DATE", mergedLastDate)
                 .putString("COMPLETED_HISTORY_JSON", mergedHistory.toString())
+                .putString("YT_USAGE_DATE", todayStr)
+                .putLong("YT_USED_MILLIS", mergedYtMillis)
                 .commit()
 
             promise.resolve(true)

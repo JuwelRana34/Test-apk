@@ -95,13 +95,14 @@ export default function Notice() {
     <View className="flex-1 bg-[#0B1120]">
       {isFocused && <StatusBar style="light" />}
 
-      {/* Modern Header & Filter Tabs */}
+      {/* 🌟 Overflow-Proof Two-Row Modern Header & Filter Tabs */}
       <View
         style={{ paddingTop: Math.max(16, insets.top + 8) }}
         className="bg-[#131C31] px-5 pb-4 rounded-b-[28px] border-b border-slate-800"
       >
-        <View className="flex-row items-center justify-between mb-1.5">
-          <View className="flex-row items-center flex-1 pr-2">
+        {/* Row 1: Title & Unread Badge */}
+        <View className="flex-row items-center justify-between mb-2.5">
+          <View className="flex-row items-center flex-1">
             <View className="w-9 h-9 rounded-xl bg-indigo-500/15 border border-indigo-500/30 items-center justify-center mr-2.5">
               <MaterialCommunityIcons
                 name="bell-badge-outline"
@@ -111,6 +112,7 @@ export default function Notice() {
             </View>
             <Text
               allowFontScaling={false}
+              numberOfLines={1}
               className="text-xl font-black text-white"
             >
               Notifications
@@ -126,65 +128,71 @@ export default function Notice() {
               </View>
             )}
           </View>
-
-          <View className="flex-row items-center gap-1.5">
-            <Pressable
-              onPress={() => void handleTestPushNotification()}
-              className="bg-emerald-500/15 border border-emerald-500/40 px-2.5 py-1.5 rounded-xl flex-row items-center"
-            >
-              <MaterialCommunityIcons
-                name="bell-ring-outline"
-                size={13}
-                color="#34D399"
-              />
-              <Text
-                allowFontScaling={false}
-                className="font-bold text-[11px] text-emerald-300 ml-1"
-              >
-                Test
-              </Text>
-            </Pressable>
-
-            <Pressable
-              onPress={() => void handleMarkAllRead()}
-              className="bg-indigo-500/15 border border-indigo-500/40 px-2.5 py-1.5 rounded-xl flex-row items-center"
-            >
-              <MaterialCommunityIcons
-                name="check-all"
-                size={14}
-                color="#818CF8"
-              />
-              <Text
-                allowFontScaling={false}
-                className="font-bold text-[11px] text-indigo-300 ml-1"
-              >
-                Read
-              </Text>
-            </Pressable>
-
-            {notices.length > 0 && (
-              <Pressable
-                onPress={handleClearAll}
-                className="bg-rose-500/15 border border-rose-500/40 px-2.5 py-1.5 rounded-xl flex-row items-center"
-              >
-                <Feather name="trash-2" size={13} color="#F43F5E" />
-                <Text
-                  allowFontScaling={false}
-                  className="font-bold text-[11px] text-rose-300 ml-1"
-                >
-                  Clear All
-                </Text>
-              </Pressable>
-            )}
-          </View>
         </View>
 
-        <Text
-          allowFontScaling={false}
-          className="text-[11px] text-slate-400 mb-3"
-        >
-          কন্টাক্ট রিমাইন্ডার ও ফোকাস অ্যালার্ট • ৭ দিনের পুরোনো নোটিফিকেশন অটো ক্লিন হয়
-        </Text>
+        {/* Row 2: 3 Clean Action Buttons (Never overlaps!) */}
+        <View className="flex-row items-center gap-2 mb-3">
+          <Pressable
+            onPress={() => void handleTestPushNotification()}
+            className="flex-1 bg-emerald-500/15 border border-emerald-500/40 py-2 px-2.5 rounded-xl flex-row items-center justify-center"
+          >
+            <MaterialCommunityIcons
+              name="bell-ring-outline"
+              size={14}
+              color="#34D399"
+            />
+            <Text
+              allowFontScaling={false}
+              numberOfLines={1}
+              className="font-bold text-xs text-emerald-300 ml-1.5"
+            >
+              Test Alert
+            </Text>
+          </Pressable>
+
+          <Pressable
+            onPress={() => void handleMarkAllRead()}
+            className="flex-1 bg-indigo-500/15 border border-indigo-500/40 py-2 px-2.5 rounded-xl flex-row items-center justify-center"
+          >
+            <MaterialCommunityIcons
+              name="check-all"
+              size={15}
+              color="#818CF8"
+            />
+            <Text
+              allowFontScaling={false}
+              numberOfLines={1}
+              className="font-bold text-xs text-indigo-300 ml-1.5"
+            >
+              Mark Read
+            </Text>
+          </Pressable>
+
+          <Pressable
+            onPress={handleClearAll}
+            disabled={notices.length === 0}
+            className={`flex-1 py-2 px-2.5 rounded-xl flex-row items-center justify-center border ${
+              notices.length > 0
+                ? "bg-rose-500/15 border-rose-500/40"
+                : "bg-slate-800/50 border-slate-800"
+            }`}
+          >
+            <Feather
+              name="trash-2"
+              size={13}
+              color={notices.length > 0 ? "#F43F5E" : "#64748B"}
+            />
+            <Text
+              allowFontScaling={false}
+              numberOfLines={1}
+              className={`font-bold text-xs ml-1.5 ${
+                notices.length > 0 ? "text-rose-300" : "text-slate-500"
+              }`}
+            >
+              Clear All
+            </Text>
+          </Pressable>
+        </View>
 
         {/* Filter Pills with Vector Icons */}
         <View className="flex-row bg-[#0B1120] p-1 rounded-2xl border border-slate-800">
@@ -253,8 +261,8 @@ export default function Notice() {
             allowFontScaling={false}
             className="text-slate-400 text-xs text-center leading-5"
           >
-            ওপরের Test বাটনে ট্যাপ করে কন্টাক্ট রিমাইন্ডার নোটিফিকেশন পরীক্ষা
-            করতে পারেন।
+            ওপরের Test Alert বাটনে ট্যাপ করে কন্টাক্ট রিমাইন্ডার নোটিফিকেশন
+            পরীক্ষা করতে পারেন।
           </Text>
         </View>
       ) : (

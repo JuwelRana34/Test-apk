@@ -51,6 +51,9 @@ export default function Profile() {
         setLoading(false);
       }
 
+      // Sync with cloud first so reinstalled app restores totalCompleted, streak & history!
+      await syncLocalDataToCloudIfOnline();
+
       let passes = 0;
       let streak = 0;
       let completed = 0;
@@ -75,8 +78,8 @@ export default function Profile() {
       } = await supabase.auth.getUser();
 
       if (user) {
-        const cloudHistory =
-          user.user_metadata?.jnuits_backup_v2?.completedHistory || {};
+        const cloudBackup = user.user_metadata?.jnuits_backup_v2 || {};
+        const cloudHistory = cloudBackup.completedHistory || {};
         const mergedHistory: Record<string, number> = { ...cloudHistory };
         Object.keys(parsedHistory).forEach((k) => {
           mergedHistory[k] = Math.max(
@@ -85,6 +88,13 @@ export default function Profile() {
           );
         });
         setHistoryMap(mergedHistory);
+
+        const mergedCompleted = Math.max(
+          completed,
+          cloudBackup.totalCompleted ?? 0,
+          Object.keys(mergedHistory).length,
+        );
+        setTotalCompleted(mergedCompleted);
 
         const freshProfile: CachedUserProfile = {
           id: user.id,
@@ -357,7 +367,7 @@ export default function Profile() {
           </View>
         </View>
 
-        {/* 🌟 NEW: LAST 2 MONTHS (60 DAYS) GITHUB-STYLE GREEN STREAK HEATMAP */}
+        {/* LAST 2 MONTHS (60 DAYS) GITHUB-STYLE GREEN STREAK HEATMAP */}
         <View className="mx-4 mt-4 rounded-3xl bg-[#131C31] border border-slate-800 p-4">
           <View className="flex-row items-center justify-between mb-3">
             <View className="flex-row items-center flex-1 pr-2">
@@ -399,7 +409,10 @@ export default function Profile() {
           <View className="bg-[#0B1120] p-3 rounded-2xl border border-slate-800/80">
             <View className="flex-row justify-between items-center">
               {/* Day labels column */}
-              <View className="justify-between mr-1.5 py-0.5" style={{ height: 118 }}>
+              <View
+                className="justify-between mr-1.5 py-0.5"
+                style={{ height: 118 }}
+              >
                 {["S", "M", "T", "W", "T", "F", "S"].map((d, idx) => (
                   <Text
                     key={idx}

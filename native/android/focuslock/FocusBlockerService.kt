@@ -136,6 +136,8 @@ class FocusBlockerService : AccessibilityService() {
         cachedNewsPlusPackages?.let { if (it.isNotEmpty()) return it }
         val result = HashSet<String>()
         result.add("com.google.android.apps.docs") // Google Drive PDF Viewer
+        result.add("cn.wps.moffice_eng") // WPS / Realme default office viewer if present
+        result.add("com.adobe.reader")
         try {
             val pm = packageManager
             val packages = pm.getInstalledPackages(PackageManager.GET_META_DATA)
@@ -146,7 +148,8 @@ class FocusBlockerService : AccessibilityService() {
                 if (label.contains("news plus") ||
                     label.contains("newsplus") ||
                     pkgName.contains("newsplus") ||
-                    (label.contains("pdf") && label.contains("viewer"))
+                    pkgName.contains("pdf") ||
+                    (label.contains("pdf") && (label.contains("viewer") || label.contains("reader")))
                 ) {
                     result.add(pkg.packageName)
                 }
@@ -154,6 +157,18 @@ class FocusBlockerService : AccessibilityService() {
         } catch (_: Exception) {}
         cachedNewsPlusPackages = result
         return result
+    }
+
+    private fun isHomeLauncherPackage(pkg: String): Boolean {
+        val lower = pkg.lowercase()
+        return lower.contains("launcher") ||
+            lower == "com.android.home" ||
+            lower == "com.oppo.launcher" ||
+            lower == "com.realme.launcher" ||
+            lower == "com.coloros.launcher" ||
+            lower == "com.sec.android.app.launcher" ||
+            lower == "com.miui.home" ||
+            lower == "com.google.android.apps.nexuslauncher"
     }
 
     private fun getAllowedAppsSet(prefs: android.content.SharedPreferences): Set<String> {
@@ -260,15 +275,15 @@ class FocusBlockerService : AccessibilityService() {
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 val vm = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
-                vm.defaultVibrator.vibrate(VibrationEffect.createOneShot(55, VibrationEffect.DEFAULT_AMPLITUDE))
+                vm.defaultVibrator.vibrate(VibrationEffect.createOneShot(80, VibrationEffect.DEFAULT_AMPLITUDE))
             } else {
                 @Suppress("DEPRECATION")
                 val vib = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    vib.vibrate(VibrationEffect.createOneShot(55, VibrationEffect.DEFAULT_AMPLITUDE))
+                    vib.vibrate(VibrationEffect.createOneShot(80, VibrationEffect.DEFAULT_AMPLITUDE))
                 } else {
                     @Suppress("DEPRECATION")
-                    vib.vibrate(55)
+                    vib.vibrate(80)
                 }
             }
         } catch (_: Exception) {}
@@ -278,24 +293,13 @@ class FocusBlockerService : AccessibilityService() {
         try {
             val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
-            val downPause = KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_PAUSE)
-            val upPause = KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MEDIA_PAUSE)
-            audioManager.dispatchMediaKeyEvent(downPause)
-            audioManager.dispatchMediaKeyEvent(upPause)
-
-            val downStop = KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_STOP)
-            val upStop = KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MEDIA_STOP)
-            audioManager.dispatchMediaKeyEvent(downStop)
-            audioManager.dispatchMediaKeyEvent(upStop)
-
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val attrs = AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
+                    .build()
                 val focusReq = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
-                    .setAudioAttributes(
-                        AudioAttributes.Builder()
-                            .setUsage(AudioAttributes.USAGE_MEDIA)
-                            .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
-                            .build()
-                    )
+                    .setAudioAttributes(attrs)
                     .setOnAudioFocusChangeListener {}
                     .build()
                 audioManager.requestAudioFocus(focusReq)
@@ -303,14 +307,26 @@ class FocusBlockerService : AccessibilityService() {
                     try {
                         audioManager.abandonAudioFocusRequest(focusReq)
                     } catch (_: Exception) {}
-                }, 1200L)
+                }, 400L)
             } else {
                 @Suppress("DEPRECATION")
                 audioManager.requestAudioFocus(
                     null,
                     AudioManager.STREAM_MUSIC,
-                    AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE
+                    AudioManager.AUDIOFOCUS_GAIN_TRANSIENT
                 )
+            }
+
+            if (audioManager.isMusicActive) {
+                val downEvent = KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_PAUSE)
+                val upEvent = KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MEDIA_PAUSE)
+                audioManager.dispatchMediaKeyEvent(downEvent)
+                audioManager.dispatchMediaKeyEvent(upEvent)
+
+                val stopDown = KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_STOP)
+                val stopUp = KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MEDIA_STOP)
+                audioManager.dispatchMediaKeyEvent(stopDown)
+                audioManager.dispatchMediaKeyEvent(stopUp)
             }
         } catch (_: Exception) {}
     }
@@ -319,25 +335,35 @@ class FocusBlockerService : AccessibilityService() {
         prefs: android.content.SharedPreferences,
         allowedApps: Set<String>
     ) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) return
         try {
-            val windowList = windows ?: return
-            val usedMillis = prefs.getLong("YT_USED_MILLIS", 0L)
-            val limitMillis = prefs.getInt("YT_LIMIT_MINUTES", 90) * 60 * 1000L
-            val isYtExhausted = usedMillis >= limitMillis
+            val winList = windows ?: return
+            val dm = resources.displayMetrics
+            val screenArea = dm.widthPixels * dm.heightPixels
+            if (screenArea <= 0) return
 
-            for (win in windowList) {
-                if (win.isInPictureInPictureMode) {
-                    val winPkg = win.root?.packageName?.toString() ?: ""
-                    val isDisallowedPiP = winPkg.isEmpty() ||
-                        !allowedApps.contains(winPkg) ||
-                        (winPkg == "com.google.android.youtube" && isYtExhausted)
+            for (win in winList) {
+                val root = win.root ?: continue
+                val pkg = root.packageName?.toString() ?: continue
+                if (pkg == applicationContext.packageName ||
+                    pkg == "com.android.systemui" ||
+                    pkg == "android"
+                ) {
+                    continue
+                }
 
-                    if (isDisallowedPiP) {
+                val bounds = android.graphics.Rect()
+                win.getBoundsInScreen(bounds)
+                val winArea = bounds.width() * bounds.height()
+
+                val isFloatingPiP = winArea in 1000..(screenArea * 60 / 100)
+                if (isFloatingPiP) {
+                    val isYtOverQuota = pkg == "com.google.android.youtube" &&
+                        prefs.getLong("YT_USED_MILLIS", 0L) >= prefs.getInt("YT_LIMIT_MINUTES", 90) * 60 * 1000L
+
+                    if (!allowedApps.contains(pkg) || pkg == "com.google.android.youtube" || isYtOverQuota) {
                         stopAllBackgroundMediaAndPiP()
                         performGlobalAction(GLOBAL_ACTION_BACK)
-                        showInstantAlert("🚫 ভাসমান ভিডিও প্লেয়ার (PiP) ব্লক করা হয়েছে!")
-                        break
                     }
                 }
             }
@@ -346,15 +372,18 @@ class FocusBlockerService : AccessibilityService() {
 
     private fun ensureAnchorOverlay() {
         if (anchorOverlayView != null) return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !android.provider.Settings.canDrawOverlays(this)) {
+            return
+        }
         try {
             val view = View(this).apply {
                 setBackgroundColor(Color.TRANSPARENT)
             }
             val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
             } else {
                 @Suppress("DEPRECATION")
-                WindowManager.LayoutParams.TYPE_SYSTEM_ALERT
+                WindowManager.LayoutParams.TYPE_PHONE
             }
             val params = WindowManager.LayoutParams(
                 1,
@@ -382,7 +411,7 @@ class FocusBlockerService : AccessibilityService() {
         anchorOverlayView = null
     }
 
-    // 🌟 Unified Cycle Timing:
+    // Unified Cycle Timing:
     // SESSION Lock -> 25m Focus + 5m Break (30m cycle)
     // SCHEDULE Lock -> 50m Focus + 10m Break (60m cycle)
     private fun getActiveCycleParameters(prefs: android.content.SharedPreferences): Pair<Long, Long>? {
@@ -444,7 +473,7 @@ class FocusBlockerService : AccessibilityService() {
                     val elapsed = now - startTime
                     val currentCycleIndex = elapsed / cycleMillis
                     val cyclePos = elapsed % cycleMillis
-                    val remainingBreakMillis = cycleMillis - cyclePos
+                    val remainingBreakMillis = minOf(cycleMillis - cyclePos, endTime - now)
 
                     if (remainingBreakMillis in 1..30000L && breakWarningShownForCycle != currentCycleIndex) {
                         breakWarningShownForCycle = currentCycleIndex
@@ -470,7 +499,7 @@ class FocusBlockerService : AccessibilityService() {
         })
     }
 
-    // 🌟 PDF-Only Guard for News Plus & Google Drive PDF Viewer:
+    // PDF-Only Guard for News Plus & Google Drive PDF Viewer:
     // Allows reading .pdf files, but blocks video players or non-PDF feeds inside News Plus!
     private fun containsVideoOrDisallowedFeedInPdfReader(
         node: AccessibilityNodeInfo?,
@@ -530,32 +559,47 @@ class FocusBlockerService : AccessibilityService() {
         val rootNode = rootInActiveWindow
         val rootPackageName = rootNode?.packageName?.toString()
         val eventPackageName = event.packageName?.toString()
+        val eventClassName = event.className?.toString() ?: ""
+        val lowerClass = eventClassName.lowercase()
 
+        // 🌟 0.01s Instant Pull-Back on Recents / Overview Button Press (Even from Allowed Apps or PDF Readers!)
         if (eventPackageName == "com.android.systemui") {
-            val className = event.className?.toString()?.lowercase() ?: ""
             val isRecentsOpened = eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
-                (className.contains("recents") ||
-                    className.contains("overview") ||
-                    className.contains(" panel") ||
-                    className.contains("quicksettings"))
-            if (!isRecentsOpened) {
+                (lowerClass.contains("recents") ||
+                    lowerClass.contains("overview") ||
+                    lowerClass.contains("quicksettings"))
+            if (isRecentsOpened && !inBreak) {
+                stopYouTubeTracker()
+                stopAllBackgroundMediaAndPiP()
+                prefs.edit().putLong("WHITELIST_GRACE_UNTIL", 0L).apply()
+                performGlobalAction(GLOBAL_ACTION_BACK)
+                redirectToMainActivity(force = true)
+            }
+            return
+        }
+
+        // 🌟 0.01s Instant Pull-Back on Home Button / Gesture to Launcher (Even if rootInActiveWindow still lags on Allowed App or PDF Reader!)
+        if (!inBreak && eventPackageName != null && isHomeLauncherPackage(eventPackageName)) {
+            val graceUntil = prefs.getLong("WHITELIST_GRACE_UNTIL", 0L)
+            if (now >= graceUntil) {
+                stopYouTubeTracker()
+                stopAllBackgroundMediaAndPiP()
+                redirectToMainActivity(force = true)
                 return
             }
         }
 
-        val packageName = rootPackageName ?: eventPackageName ?: return
+        val packageName = eventPackageName ?: rootPackageName ?: return
         val ownPackage = applicationContext.packageName
 
-        if (packageName == ownPackage) {
+        if (packageName == ownPackage || rootPackageName == ownPackage) {
             stopYouTubeTracker()
             return
         }
 
         val lowerPkg = packageName.lowercase()
-        val eventClassName = event.className?.toString() ?: ""
-        val lowerClass = eventClassName.lowercase()
 
-        // 🌟 Allow Android & Realme "Open with..." Chooser / Intent Resolver & File Picker so PDF opening works seamlessly!
+        // Allow Android & Realme "Open with..." Chooser / Intent Resolver & File Picker so PDF opening works seamlessly!
         if (lowerPkg.contains("inputmethod") ||
             lowerPkg.contains("keyboard") ||
             lowerPkg.contains("honeyboard") ||
@@ -572,10 +616,13 @@ class FocusBlockerService : AccessibilityService() {
             return
         }
 
-        // 🌟 ALWAYS BLOCK SHORTS & REELS (Even during the 5m / 10m Break Phase!)
+        // ALWAYS BLOCK SHORTS & REELS (Even during the 5m / 10m Break Phase!)
         if (packageName == "com.google.android.youtube" ||
             packageName == "com.instagram.android" ||
-            packageName == "com.facebook.katana"
+            packageName == "com.facebook.katana" ||
+            rootPackageName == "com.google.android.youtube" ||
+            rootPackageName == "com.instagram.android" ||
+            rootPackageName == "com.facebook.katana"
         ) {
             var currentParent = event.source
             var caughtShorts = false
@@ -603,10 +650,17 @@ class FocusBlockerService : AccessibilityService() {
             return
         }
 
-        // 🌟 Default PDF Readers (News Plus PDF Viewer + Google Drive PDF Viewer) with PDF-Only Guard!
+        // 🌟 Default PDF Readers (News Plus PDF Viewer + Google Drive PDF Viewer + any PDF Viewer activity) with PDF-Only Guard!
         val pdfReaders = getPdfReaderPackages()
-        if (pdfReaders.contains(packageName) || (eventPackageName != null && pdfReaders.contains(eventPackageName))) {
+        val isPdfReaderActive = pdfReaders.contains(packageName) ||
+            (rootPackageName != null && pdfReaders.contains(rootPackageName) && !isHomeLauncherPackage(packageName)) ||
+            lowerClass.contains("pdf") ||
+            lowerPkg.contains("pdf")
+
+        if (isPdfReaderActive) {
             stopYouTubeTracker()
+            // Clear launch grace as soon as PDF reader is open so pressing Home/Recents later pulls back in 0.01s!
+            prefs.edit().putLong("WHITELIST_GRACE_UNTIL", 0L).apply()
             if (containsVideoOrDisallowedFeedInPdfReader(rootNode, eventClassName)) {
                 stopAllBackgroundMediaAndPiP()
                 performGlobalAction(GLOBAL_ACTION_BACK)
@@ -618,14 +672,14 @@ class FocusBlockerService : AccessibilityService() {
 
         // 🌟 WHITELISTED APPS HANDLING
         val isAllowedApp = allowedApps.contains(packageName) ||
-            (eventPackageName != null && allowedApps.contains(eventPackageName))
+            (rootPackageName != null && allowedApps.contains(rootPackageName) && !isHomeLauncherPackage(packageName))
 
         if (isAllowedApp) {
-            val activeAllowedPkg = if (allowedApps.contains(packageName)) packageName else eventPackageName!!
+            val activeAllowedPkg = if (allowedApps.contains(packageName)) packageName else rootPackageName!!
 
-            // If user opens a PDF from Telegram/WhatsApp, extend PDF reading grace
-            if (activeAllowedPkg.contains("telegram") || activeAllowedPkg.contains("whatsapp")) {
-                prefs.edit().putLong("PDF_OPEN_GRACE_UNTIL", now + 8000L).apply()
+            // Clear launch grace as soon as the allowed app is in foreground so Home/Recents pulls back in 0.01s!
+            if (prefs.getLong("WHITELIST_GRACE_UNTIL", 0L) > 0L) {
+                prefs.edit().putLong("WHITELIST_GRACE_UNTIL", 0L).apply()
             }
 
             if (activeAllowedPkg == "com.google.android.youtube") {
@@ -663,18 +717,10 @@ class FocusBlockerService : AccessibilityService() {
             return
         }
 
-        // Allow Realme/Android PDF viewer activity launched directly from Telegram or Read Study PDF button
-        val pdfGraceUntil = prefs.getLong("PDF_OPEN_GRACE_UNTIL", 0L)
-        if (now < pdfGraceUntil || lowerClass.contains("pdf") || lowerPkg.contains("pdf")) {
-            if (!containsVideoOrDisallowedFeedInPdfReader(rootNode, eventClassName)) {
-                return
-            }
-        }
-
         val lastLaunchedApp = prefs.getString("LAST_LAUNCHED_ALLOWED_APP", "") ?: ""
         val graceUntil = prefs.getLong("WHITELIST_GRACE_UNTIL", 0L)
         if (now < graceUntil && lastLaunchedApp.isNotEmpty()) {
-            if (lowerPkg.contains("launcher") || lowerPkg.contains("systemui")) {
+            if (isHomeLauncherPackage(packageName) || lowerPkg.contains("systemui")) {
                 return
             }
         }
@@ -682,14 +728,6 @@ class FocusBlockerService : AccessibilityService() {
         val isWindowTransition = eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
             eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED
         if (!isWindowTransition) return
-
-        if (rootPackageName != null &&
-            (rootPackageName == ownPackage ||
-                allowedApps.contains(rootPackageName) ||
-                pdfReaders.contains(rootPackageName))
-        ) {
-            return
-        }
 
         stopYouTubeTracker()
         stopAllBackgroundMediaAndPiP()
@@ -702,7 +740,8 @@ class FocusBlockerService : AccessibilityService() {
             performGlobalAction(GLOBAL_ACTION_BACK)
         }
 
-        redirectToMainActivity(force = false)
+        // Force 0.01s instant pull-back without 250ms throttle!
+        redirectToMainActivity(force = true)
     }
 
     private fun checkBrowserUrlAndBlock(

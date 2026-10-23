@@ -1,7 +1,6 @@
-import { MaterialCommunityIcons } from "@expo/vector-icons";
+import { Ionicons } from "@expo/vector-icons";
 import { Tabs } from "expo-router";
 import React from "react";
-import { View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 export default function TabLayout() {
@@ -22,7 +21,7 @@ export default function TabLayout() {
           shadowOffset: { width: 0, height: -6 },
           shadowOpacity: 0.35,
           shadowRadius: 12,
-          height: 64 + insets.bottom,
+          height: 62 + insets.bottom,
           paddingBottom: insets.bottom > 0 ? insets.bottom : 10,
           paddingTop: 6,
         },
@@ -38,17 +37,11 @@ export default function TabLayout() {
         options={{
           title: "Home",
           tabBarIcon: ({ color, focused }) => (
-            <View
-              className={`px-3.5 py-1 rounded-full ${
-                focused ? "bg-indigo-500/15" : ""
-              }`}
-            >
-              <MaterialCommunityIcons
-                name={focused ? "view-dashboard" : "view-dashboard-outline"}
-                color={color}
-                size={22}
-              />
-            </View>
+            <Ionicons
+              name={focused ? "grid" : "grid-outline"}
+              color={color}
+              size={22}
+            />
           ),
         }}
       />
@@ -58,17 +51,11 @@ export default function TabLayout() {
         options={{
           title: "Alerts",
           tabBarIcon: ({ color, focused }) => (
-            <View
-              className={`px-3.5 py-1 rounded-full ${
-                focused ? "bg-indigo-500/15" : ""
-              }`}
-            >
-              <MaterialCommunityIcons
-                name={focused ? "bell-ring" : "bell-outline"}
-                color={color}
-                size={22}
-              />
-            </View>
+            <Ionicons
+              name={focused ? "notifications" : "notifications-outline"}
+              color={color}
+              size={22}
+            />
           ),
         }}
       />
@@ -78,17 +65,11 @@ export default function TabLayout() {
         options={{
           title: "Profile",
           tabBarIcon: ({ color, focused }) => (
-            <View
-              className={`px-3.5 py-1 rounded-full ${
-                focused ? "bg-indigo-500/15" : ""
-              }`}
-            >
-              <MaterialCommunityIcons
-                name={focused ? "account-circle" : "account-circle-outline"}
-                color={color}
-                size={22}
-              />
-            </View>
+            <Ionicons
+              name={focused ? "person-circle" : "person-circle-outline"}
+              color={color}
+              size={24}
+            />
           ),
         }}
       />

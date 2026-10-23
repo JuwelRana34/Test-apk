@@ -21,6 +21,7 @@ import {
   CACHED_USER_PROFILE_KEY,
   CachedUserProfile,
   getInAppNotices,
+  syncLocalDataToCloudIfOnline,
 } from "../../lib/supabase";
 
 const { FocusLock } = NativeModules;
@@ -57,6 +58,9 @@ export default function HomePage() {
     useCallback(() => {
       const loadHomeDashboard = async () => {
         try {
+          // Ensure cloud backup & stats are synced
+          void syncLocalDataToCloudIfOnline();
+
           const [cachedProfileRaw, contactsRaw, noticesList] =
             await Promise.all([
               AsyncStorage.getItem(CACHED_USER_PROFILE_KEY),
@@ -260,58 +264,70 @@ export default function HomePage() {
             </View>
           </View>
 
-          {/* Gamified Pass, Streak & Active Lock Status Bar */}
-          <View className="bg-[#0B1120]/90 border border-slate-800 p-3.5 rounded-2xl flex-row items-center justify-between">
+          {/* 🌟 Overflow-Proof Pass, Streak & Focus Button Card (Never overlaps!) */}
+          <View className="bg-[#0B1120]/90 border border-slate-800 p-3 rounded-2xl flex-row items-center justify-between">
             <Pressable
               onPress={() => router.push("/(tabs)/profile")}
-              className="flex-row items-center flex-1 pr-2"
+              className="flex-row items-center flex-1 mr-2"
             >
-              <View className="w-8 h-8 rounded-xl bg-amber-500/15 border border-amber-500/30 items-center justify-center">
-                <MaterialCommunityIcons
-                  name="ticket-confirmation"
-                  size={17}
-                  color="#FBBF24"
-                />
-              </View>
-              <View className="ml-2.5">
-                <Text
-                  allowFontScaling={false}
-                  className="text-white font-black text-xs"
-                >
-                  {emergencyPasses}/5 Passes
-                </Text>
-                <Text
-                  allowFontScaling={false}
-                  className="text-slate-400 text-[10px]"
-                >
-                  Emergency Unlock
-                </Text>
+              <View className="flex-row items-center flex-1">
+                <View className="w-8 h-8 rounded-xl bg-amber-500/15 border border-amber-500/30 items-center justify-center">
+                  <MaterialCommunityIcons
+                    name="ticket-confirmation"
+                    size={16}
+                    color="#FBBF24"
+                  />
+                </View>
+                <View className="ml-2 flex-shrink">
+                  <Text
+                    allowFontScaling={false}
+                    numberOfLines={1}
+                    className="text-white font-black text-xs"
+                  >
+                    {emergencyPasses}/5 Pass
+                  </Text>
+                  <Text
+                    allowFontScaling={false}
+                    numberOfLines={1}
+                    className="text-slate-400 text-[10px]"
+                  >
+                    Unlock
+                  </Text>
+                </View>
               </View>
 
-              <View className="w-[1px] h-7 bg-slate-800 mx-3" />
+              <View className="w-[1px] h-7 bg-slate-800 mx-2" />
 
-              <View className="w-8 h-8 rounded-xl bg-emerald-500/15 border border-emerald-500/30 items-center justify-center">
-                <MaterialCommunityIcons name="fire" size={18} color="#34D399" />
-              </View>
-              <View className="ml-2.5">
-                <Text
-                  allowFontScaling={false}
-                  className="text-white font-black text-xs"
-                >
-                  {streakDays}/3d Streak
-                </Text>
-                <Text
-                  allowFontScaling={false}
-                  className="text-slate-400 text-[10px]"
-                >
-                  {totalCompleted} Total Done
-                </Text>
+              <View className="flex-row items-center flex-1">
+                <View className="w-8 h-8 rounded-xl bg-emerald-500/15 border border-emerald-500/30 items-center justify-center">
+                  <MaterialCommunityIcons
+                    name="fire"
+                    size={17}
+                    color="#34D399"
+                  />
+                </View>
+                <View className="ml-2 flex-shrink">
+                  <Text
+                    allowFontScaling={false}
+                    numberOfLines={1}
+                    className="text-white font-black text-xs"
+                  >
+                    {streakDays}/3d Streak
+                  </Text>
+                  <Text
+                    allowFontScaling={false}
+                    numberOfLines={1}
+                    className="text-slate-400 text-[10px]"
+                  >
+                    {totalCompleted} Done
+                  </Text>
+                </View>
               </View>
             </Pressable>
 
             <Pressable
               onPress={() => router.push("/features/StrictFocusScreen")}
-              className={`px-3 py-2 rounded-xl flex-row items-center border ${
+              className={`px-3 py-2 rounded-xl flex-row items-center border flex-shrink-0 ${
                 isFocusActive
                   ? "bg-rose-500/20 border-rose-500/50"
                   : "bg-indigo-600 border-indigo-500"
@@ -324,9 +340,10 @@ export default function HomePage() {
               />
               <Text
                 allowFontScaling={false}
-                className="text-white font-black text-[11px] ml-1.5"
+                numberOfLines={1}
+                className="text-white font-black text-[11px] ml-1"
               >
-                {isFocusActive ? `${remainingMins}m Left` : "Focus"}
+                {isFocusActive ? `${remainingMins}m` : "Focus"}
               </Text>
             </Pressable>
           </View>

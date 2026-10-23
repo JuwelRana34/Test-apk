@@ -452,7 +452,7 @@ export async function spendEmergencyPassWithCloudCheck(): Promise<boolean> {
 
 export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
   try {
-    const [
+    let [
       contactsRaw,
       statsRaw,
       allowedAppsRaw,
@@ -468,6 +468,8 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
       AsyncStorage.getItem("@focus_yt_limit_minutes"),
     ]);
 
+    const todayIso = new Date().toISOString().split("T")[0];
+
     let nativeLockState = {
       emergencyPasses: 0,
       totalPassesEarned: 0,
@@ -476,6 +478,8 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
       totalCompleted: 0,
       lastCompletedDate: "",
       completedHistoryJson: "{}",
+      ytUsedSeconds: 0,
+      ytUsageDate: todayIso,
     };
 
     if (Platform.OS === "android" && FocusLock?.getFocusSessionState) {
@@ -489,19 +493,10 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
           totalCompleted: s.totalCompleted ?? 0,
           lastCompletedDate: s.lastCompletedDate || "",
           completedHistoryJson: s.completedHistoryJson || "{}",
+          ytUsedSeconds: s.ytUsedSeconds ?? 0,
+          ytUsageDate: s.ytUsageDate || todayIso,
         };
       } catch {}
-    }
-
-    const cachedRaw = await AsyncStorage.getItem(CACHED_USER_PROFILE_KEY);
-    if (cachedRaw) {
-      const cached: CachedUserProfile = JSON.parse(cachedRaw);
-      cached.emergencyPasses = nativeLockState.emergencyPasses;
-      cached.streakDays = nativeLockState.streakDays;
-      await AsyncStorage.setItem(
-        CACHED_USER_PROFILE_KEY,
-        JSON.stringify(cached),
-      );
     }
 
     await AsyncStorage.setItem(OFFLINE_SYNC_QUEUE_KEY, "true");
@@ -511,6 +506,49 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
     } = await supabase.auth.getUser();
 
     const cloudBackup = currentUser?.user_metadata?.jnuits_backup_v2 || {};
+
+    // 🌟 If local schedules are missing (e.g., fresh reinstall), restore schedules from Supabase Cloud immediately!
+    if (
+      (!schedulesRaw || schedulesRaw === "[]") &&
+      Array.isArray(cloudBackup.schedules) &&
+      cloudBackup.schedules.length > 0
+    ) {
+      schedulesRaw = JSON.stringify(cloudBackup.schedules);
+      await AsyncStorage.setItem("@focus_multi_schedules", schedulesRaw);
+    }
+
+    if (
+      (!allowedAppsRaw || allowedAppsRaw === "[]") &&
+      Array.isArray(cloudBackup.allowedApps) &&
+      cloudBackup.allowedApps.length > 0
+    ) {
+      allowedAppsRaw = JSON.stringify(cloudBackup.allowedApps);
+      await AsyncStorage.setItem("@focus_allowed_apps", allowedAppsRaw);
+      if (Platform.OS === "android" && FocusLock?.saveAllowedApps) {
+        await FocusLock.saveAllowedApps(cloudBackup.allowedApps);
+      }
+    }
+
+    if (
+      (!allowedDomainsRaw || allowedDomainsRaw === "[]") &&
+      Array.isArray(cloudBackup.allowedDomains) &&
+      cloudBackup.allowedDomains.length > 0
+    ) {
+      allowedDomainsRaw = JSON.stringify(cloudBackup.allowedDomains);
+      await AsyncStorage.setItem("@focus_allowed_domains", allowedDomainsRaw);
+      if (Platform.OS === "android" && FocusLock?.saveAllowedDomains) {
+        await FocusLock.saveAllowedDomains(cloudBackup.allowedDomains);
+      }
+    }
+
+    if (!ytLimitRaw && cloudBackup.ytLimitMinutes) {
+      ytLimitRaw = String(cloudBackup.ytLimitMinutes);
+      await AsyncStorage.setItem("@focus_yt_limit_minutes", ytLimitRaw);
+      if (Platform.OS === "android" && FocusLock?.setYouTubeLimitMinutes) {
+        await FocusLock.setYouTubeLimitMinutes(cloudBackup.ytLimitMinutes);
+      }
+    }
+
     const cloudEarned =
       cloudBackup.totalPassesEarned ?? cloudBackup.emergencyPasses ?? 0;
     const cloudUsed = cloudBackup.totalPassesUsed ?? 0;
@@ -546,6 +584,22 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
     });
     const mergedHistoryJson = JSON.stringify(mergedHistoryObj);
 
+    const mergedTotalCompleted = Math.max(
+      nativeLockState.totalCompleted,
+      cloudBackup.totalCompleted ?? 0,
+      Object.keys(mergedHistoryObj).length,
+    );
+
+    // Anti-Cheat Daily YouTube Usage Merge
+    const activeDate = nativeLockState.ytUsageDate || todayIso;
+    const cloudYtDate = cloudBackup.ytUsageDate || "";
+    const cloudYtSecs =
+      cloudYtDate === activeDate ? (cloudBackup.ytUsedSeconds ?? 0) : 0;
+    const mergedYtUsedSeconds = Math.max(
+      nativeLockState.ytUsedSeconds,
+      cloudYtSecs,
+    );
+
     if (Platform.OS === "android" && FocusLock?.syncPassAndStreakFromCloud) {
       await FocusLock.syncPassAndStreakFromCloud(
         mergedPasses,
@@ -554,6 +608,20 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
         mergedEarned,
         mergedUsed,
         mergedHistoryJson,
+        mergedTotalCompleted,
+        activeDate,
+        mergedYtUsedSeconds,
+      );
+    }
+
+    const cachedRaw = await AsyncStorage.getItem(CACHED_USER_PROFILE_KEY);
+    if (cachedRaw) {
+      const cached: CachedUserProfile = JSON.parse(cachedRaw);
+      cached.emergencyPasses = mergedPasses;
+      cached.streakDays = mergedStreak;
+      await AsyncStorage.setItem(
+        CACHED_USER_PROFILE_KEY,
+        JSON.stringify(cached),
       );
     }
 
@@ -578,16 +646,15 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
         ytLimitMinutes: ytLimitRaw
           ? parseInt(ytLimitRaw, 10)
           : cloudBackup.ytLimitMinutes || 90,
+        ytUsageDate: activeDate,
+        ytUsedSeconds: mergedYtUsedSeconds,
         emergencyPasses: mergedPasses,
         totalPassesEarned: mergedEarned,
         totalPassesUsed: mergedUsed,
         streakDays: mergedStreak,
         lastCompletedDate: mergedLastDate,
         completedHistory: mergedHistoryObj,
-        totalCompleted: Math.max(
-          nativeLockState.totalCompleted,
-          cloudBackup.totalCompleted ?? 0,
-        ),
+        totalCompleted: mergedTotalCompleted,
       },
     };
 
@@ -650,6 +717,13 @@ export async function restoreCloudBackupAfterGoogleLogin(): Promise<void> {
       }
 
       const existingApps = await AsyncStorage.getItem("@focus_allowed_apps");
+      const appsToUse: string[] =
+        existingApps && existingApps !== "[]"
+          ? JSON.parse(existingApps)
+          : Array.isArray(backup.allowedApps)
+            ? backup.allowedApps
+            : [];
+
       if (
         (!existingApps || existingApps === "[]") &&
         Array.isArray(backup.allowedApps) &&
@@ -681,6 +755,56 @@ export async function restoreCloudBackupAfterGoogleLogin(): Promise<void> {
         }
       }
 
+      const ytLimit = backup.ytLimitMinutes || 90;
+      if (backup.ytLimitMinutes) {
+        await AsyncStorage.setItem(
+          "@focus_yt_limit_minutes",
+          String(backup.ytLimitMinutes),
+        );
+        if (Platform.OS === "android" && FocusLock?.setYouTubeLimitMinutes) {
+          await FocusLock.setYouTubeLimitMinutes(backup.ytLimitMinutes);
+        }
+      }
+
+      // 🌟 Restore saved Schedules from Supabase Cloud & register in Android AlarmManager!
+      const existingSchedules = await AsyncStorage.getItem(
+        "@focus_multi_schedules",
+      );
+      if (
+        (!existingSchedules || existingSchedules === "[]") &&
+        Array.isArray(backup.schedules) &&
+        backup.schedules.length > 0
+      ) {
+        await AsyncStorage.setItem(
+          "@focus_multi_schedules",
+          JSON.stringify(backup.schedules),
+        );
+
+        if (Platform.OS === "android" && FocusLock?.setAdvancedSchedules) {
+          const hasEnabled = backup.schedules.some((s: any) => !!s.isEnabled);
+          const formatted = backup.schedules.map((s: any) => {
+            const st = new Date(s.startTime);
+            const et = new Date(s.endTime);
+            return {
+              isEnabled: !!s.isEnabled,
+              startHour: st.getHours(),
+              startMinute: st.getMinutes(),
+              endHour: et.getHours(),
+              endMinute: et.getMinutes(),
+              activeDays: Array.isArray(s.activeDays)
+                ? s.activeDays
+                : [0, 1, 2, 3, 4, 5, 6],
+            };
+          });
+          await FocusLock.setAdvancedSchedules(
+            JSON.stringify(formatted),
+            hasEnabled,
+            appsToUse,
+            ytLimit,
+          );
+        }
+      }
+
       if (Platform.OS === "android" && FocusLock?.syncPassAndStreakFromCloud) {
         await FocusLock.syncPassAndStreakFromCloud(
           backup.emergencyPasses ?? 0,
@@ -689,6 +813,9 @@ export async function restoreCloudBackupAfterGoogleLogin(): Promise<void> {
           backup.totalPassesEarned ?? backup.emergencyPasses ?? 0,
           backup.totalPassesUsed ?? 0,
           JSON.stringify(backup.completedHistory || {}),
+          backup.totalCompleted ?? 0,
+          backup.ytUsageDate || "",
+          backup.ytUsedSeconds ?? 0,
         );
       }
     }

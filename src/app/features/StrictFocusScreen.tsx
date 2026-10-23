@@ -59,6 +59,7 @@ interface FocusSessionState {
   pomodoroEnabled: boolean;
   scheduleBreakEnabled?: boolean;
   isBreakActive: boolean;
+  noMoreBreaks?: boolean;
   cycleRemainingMillis: number;
   emergencyPasses: number;
   totalPassesEarned?: number;
@@ -68,6 +69,7 @@ interface FocusSessionState {
   ytUsedSeconds?: number;
   ytUsedMinutes: number;
   ytLimitMinutes: number;
+  ytUsageDate?: string;
   lastCompletedDate?: string;
   completedHistoryJson?: string;
 }
@@ -204,6 +206,11 @@ export default function StrictFocusScreen() {
   const [appModalVisible, setAppModalVisible] = useState(false);
   const [scheduleModalVisible, setScheduleModalVisible] = useState(false);
   const [emergencyModalVisible, setEmergencyModalVisible] = useState(false);
+  const [scheduleSavedModal, setScheduleSavedModal] = useState<{
+    visible: boolean;
+    hasEnabled: boolean;
+    activeCount: number;
+  }>({ visible: false, hasEnabled: false, activeCount: 0 });
   const [spendingPass, setSpendingPass] = useState(false);
 
   const [schedules, setSchedules] = useState<ScheduleItem[]>([
@@ -225,6 +232,7 @@ export default function StrictFocusScreen() {
   const [remainingMillis, setRemainingMillis] = useState(0);
   const [lockMode, setLockMode] = useState<"SESSION" | "SCHEDULE">("SESSION");
   const [isBreakActive, setIsBreakActive] = useState(false);
+  const [noMoreBreaks, setNoMoreBreaks] = useState(false);
   const [cycleRemainingMillis, setCycleRemainingMillis] = useState(0);
   const [emergencyPasses, setEmergencyPasses] = useState(0);
   const [streakDays, setStreakDays] = useState(0);
@@ -234,6 +242,7 @@ export default function StrictFocusScreen() {
   const scaleAnim = useRef(new Animated.Value(1)).current;
   const isStartingFocusRef = useRef(false);
   const isHoldPressActiveRef = useRef(false);
+  const wasActiveSessionRef = useRef(false);
 
   // Track Android/iOS soft keyboard height so inputs inside Modals never get covered!
   useEffect(() => {
@@ -274,16 +283,30 @@ export default function StrictFocusScreen() {
     try {
       const session = await FocusLock.getFocusSessionState();
       const active = session.active && session.endTimeMillis > Date.now();
+      const totalRem = active
+        ? Math.max(0, session.endTimeMillis - Date.now())
+        : 0;
+
+      // If session just completed naturally, immediately sync totalCompleted & streak to Supabase Cloud!
+      if (wasActiveSessionRef.current && !active) {
+        wasActiveSessionRef.current = false;
+        void syncLocalDataToCloudIfOnline();
+      } else if (active) {
+        wasActiveSessionRef.current = true;
+      }
+
       setIsFocusActive(active);
-      setRemainingMillis(
-        active ? Math.max(0, session.endTimeMillis - Date.now()) : 0,
-      );
+      setRemainingMillis(totalRem);
       setLockMode(session.lockMode || "SESSION");
       if (typeof session.scheduleBreakEnabled === "boolean") {
         setScheduleBreakEnabledState(session.scheduleBreakEnabled);
       }
       setIsBreakActive(!!session.isBreakActive);
-      setCycleRemainingMillis(Math.max(0, session.cycleRemainingMillis || 0));
+      setNoMoreBreaks(!!session.noMoreBreaks);
+      // Never allow cycleRemainingMillis to exceed totalRem!
+      setCycleRemainingMillis(
+        Math.min(totalRem, Math.max(0, session.cycleRemainingMillis || 0)),
+      );
       setEmergencyPasses(session.emergencyPasses ?? 0);
       setStreakDays(session.streakDays ?? 0);
       setYtUsedSeconds(
@@ -300,7 +323,11 @@ export default function StrictFocusScreen() {
     }
     void checkAllPermissions();
     void refreshFocusSession();
-    void loadSettings();
+    void (async () => {
+      await loadSettings();
+      await syncLocalDataToCloudIfOnline();
+      await loadSettings();
+    })();
     setTimeout(() => {
       void fetchInstalledApps();
     }, 150);
@@ -309,7 +336,10 @@ export default function StrictFocusScreen() {
       if (state === "active") {
         void checkAllPermissions();
         void refreshFocusSession();
-        void syncLocalDataToCloudIfOnline();
+        void (async () => {
+          await syncLocalDataToCloudIfOnline();
+          await loadSettings();
+        })();
       }
     });
 
@@ -366,11 +396,9 @@ export default function StrictFocusScreen() {
         AsyncStorage.getItem("@focus_schedule_break_enabled"),
       ]);
 
+      let parsedApps: string[] = [];
       if (savedApps) {
-        const parsedApps: string[] = JSON.parse(savedApps).slice(
-          0,
-          MAX_SELECTED_APPS,
-        );
+        parsedApps = JSON.parse(savedApps).slice(0, MAX_SELECTED_APPS);
         setSelectedApps(parsedApps);
         if (FocusLock?.saveAllowedApps) {
           await FocusLock.saveAllowedApps(parsedApps);
@@ -393,9 +421,10 @@ export default function StrictFocusScreen() {
         await FocusLock.saveAllowedDomains(DEFAULT_ALLOWED_DOMAINS);
       }
 
+      let currentYtLimit = 90;
       if (savedYtLimit) {
-        const limit = parseInt(savedYtLimit, 10) || 90;
-        setYtLimitMinutes(limit);
+        currentYtLimit = parseInt(savedYtLimit, 10) || 90;
+        setYtLimitMinutes(currentYtLimit);
       }
 
       if (savedSchedBreak !== null) {
@@ -408,13 +437,33 @@ export default function StrictFocusScreen() {
 
       if (savedSchedules) {
         const parsed = JSON.parse(savedSchedules);
-        setSchedules(
-          parsed.map((s: any) => ({
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          const hydrated: ScheduleItem[] = parsed.map((s: any) => ({
             ...s,
             startTime: new Date(s.startTime),
             endTime: new Date(s.endTime),
-          })),
-        );
+          }));
+          setSchedules(hydrated);
+
+          // Ensure native AlarmManager has the restored schedules registered!
+          if (FocusLock?.setAdvancedSchedules) {
+            const hasEnabled = hydrated.some((s) => s.isEnabled);
+            const formatted = hydrated.map((s) => ({
+              isEnabled: s.isEnabled,
+              startHour: s.startTime.getHours(),
+              startMinute: s.startTime.getMinutes(),
+              endHour: s.endTime.getHours(),
+              endMinute: s.endTime.getMinutes(),
+              activeDays: s.activeDays,
+            }));
+            await FocusLock.setAdvancedSchedules(
+              JSON.stringify(formatted),
+              hasEnabled,
+              parsedApps,
+              currentYtLimit,
+            );
+          }
+        }
       }
     } catch {}
   };
@@ -531,7 +580,8 @@ export default function StrictFocusScreen() {
         }
       }
 
-      const hasEnabled = schedulesToSave.some((s) => s.isEnabled);
+      const enabledCount = schedulesToSave.filter((s) => s.isEnabled).length;
+      const hasEnabled = enabledCount > 0;
 
       if (hasEnabled && !(await verifyRequiredPermissionsBeforeLock())) {
         return;
@@ -568,12 +618,11 @@ export default function StrictFocusScreen() {
 
       if (!silent) {
         Vibration.vibrate(100);
-        Alert.alert(
-          "Schedule Lock সেভ হয়েছে",
-          hasEnabled
-            ? "আপনার নির্ধারিত সময়ে প্রতিদিন অটোমেটিক কড়া লক (সর্বোচ্চ ১০ ঘণ্টা) চালু হয়ে যাবে।"
-            : "শিডিউল সেভ হয়েছে (বর্তমানে অফ করা আছে)।",
-        );
+        setScheduleSavedModal({
+          visible: true,
+          hasEnabled,
+          activeCount: enabledCount,
+        });
       }
     } catch {
       if (!silent) Alert.alert("Error", "Could not save schedules.");
@@ -820,7 +869,7 @@ export default function StrictFocusScreen() {
     (lockMode === "SCHEDULE" && scheduleBreakEnabled);
 
   // =========================================================================
-  // 1. ACTIVE LOCK SCREEN DASHBOARD (With Read Study PDF, 50m/10m Schedule Break & Crisp Vector Icons!)
+  // 1. ACTIVE LOCK SCREEN DASHBOARD (With Smart Break Timer & Read Study PDF!)
   // =========================================================================
   if (isFocusActive) {
     return (
@@ -891,7 +940,7 @@ export default function StrictFocusScreen() {
             </View>
           </View>
 
-          {/* Center Lock / Break Status */}
+          {/* Center Lock / Break Status (With Smart Timer Clamping!) */}
           <View className="items-center my-2.5">
             <View
               className={`p-4 rounded-full items-center justify-center border-2 ${
@@ -933,7 +982,7 @@ export default function StrictFocusScreen() {
                 isBreakActive ? "text-emerald-400" : "text-rose-400"
               }`}
             >
-              {isCycleModeActive
+              {isCycleModeActive && !noMoreBreaks
                 ? formatCountdown(cycleRemainingMillis)
                 : formatCountdown(remainingMillis)}
             </Text>
@@ -945,8 +994,11 @@ export default function StrictFocusScreen() {
                   numberOfLines={1}
                   className="text-slate-300 text-[11px] font-bold text-center"
                 >
-                  {isBreakActive ? "লক শুরু হতে বাকি • " : "ব্রেক পেতে বাকি • "}
-                  মোট বাকি: {formatCountdown(remainingMillis)}
+                  {isBreakActive
+                    ? `লক শুরু হতে বাকি • মোট বাকি: ${formatCountdown(remainingMillis)}`
+                    : noMoreBreaks
+                      ? `লক শেষ হতে বাকি (আর কোনো ব্রেক নেই)`
+                      : `ব্রেক পেতে বাকি • মোট বাকি: ${formatCountdown(remainingMillis)}`}
                 </Text>
               </View>
             )}
@@ -954,7 +1006,7 @@ export default function StrictFocusScreen() {
 
           {/* Middle Section: Read Study PDF Button + Live YT Seconds + Allowed Apps + Chrome Links */}
           <View>
-            {/* 🌟 NEW: Read Study PDF Button (.pdf-only picker + News Plus / Drive PDF Viewer) */}
+            {/* Read Study PDF Button (.pdf-only picker + News Plus / Drive PDF Viewer) */}
             <Pressable
               onPress={() => void handlePickAndReadStudyPdf()}
               className="bg-sky-500/15 border border-sky-500/40 rounded-2xl p-3 mb-2.5 flex-row items-center justify-between active:bg-sky-500/25"
@@ -1407,7 +1459,7 @@ export default function StrictFocusScreen() {
 
         {/* MIDDLE-TO-BOTTOM: CLEAN CURVED SHEET */}
         <View className="bg-[#0B1120] rounded-t-[32px] -mt-6 px-5 pt-6">
-          {/* 🌟 AUTO-HIDE SYSTEM PERMISSIONS BANNER: Only shown when at least 1 permission is missing! */}
+          {/* AUTO-HIDE SYSTEM PERMISSIONS BANNER: Only shown when at least 1 permission is missing! */}
           {!allPermsReady && (
             <Pressable
               onPress={() => setSettingsModalVisible(true)}
@@ -1469,7 +1521,7 @@ export default function StrictFocusScreen() {
             />
           </View>
 
-          {/* CARD 2: Allowed Apps & Active Rules + Study PDF Launcher */}
+          {/* CARD 2: Allowed Apps & Active Rules + Study PDF Launcher (KEPT EXACTLY AS USER LIKED!) */}
           <View className="bg-[#131C31] p-4 rounded-3xl border border-slate-800 mb-4">
             <View className="flex-row items-center justify-between mb-3">
               <View className="flex-row items-center">
@@ -1599,7 +1651,7 @@ export default function StrictFocusScreen() {
             </View>
           </View>
 
-          {/* CARD 3: Daily Schedule Lock Card (With 50m Lock + 10m Break Toggle & Max 10h Cap!) */}
+          {/* CARD 3: Daily Schedule Lock Card (KEPT EXACTLY AS USER LIKED!) */}
           <View className="bg-[#131C31] p-4 rounded-3xl border border-slate-800">
             <View className="flex-row items-center justify-between mb-3">
               <View className="flex-row items-center flex-1 pr-2">
@@ -1813,9 +1865,9 @@ export default function StrictFocusScreen() {
             >
               • প্রতিদিন কমপক্ষে ৩০ মিনিটের লক সফলভাবে পূর্ণ করলে ১ স্ট্রিক যোগ
               হয় (দিনে সর্বোচ্চ ১টি)।{"\n"}• টানা ৩ দিন পূর্ণ করলে পুরস্কার
-              হিসেবে +1 Emergency Pass পাবেন (সর্বোচ্চ ৫টি)।{"\n"}• প্রোফাইল
-              স্ক্রিনে গত ২ মাসের (৬০ দিনের) GitHub Green Streak গ্রাফ দেখতে
-              পাবেন।
+              হিসেবে +1 Emergency Pass পাবেন (সর্বোচ্চ ৫টি)। মাঝখানে ১ দিন গ্যাপ
+              গেলে শুধু ৩-দিনের স্ট্রিক কাউন্টার 1/3 থেকে শুরু হবে, জমানো পাস
+              কখনোই কমবে না।
             </Text>
 
             <Pressable
@@ -1834,7 +1886,7 @@ export default function StrictFocusScreen() {
       </Modal>
 
       {/* ===================================================================== */}
-      {/* MODAL 2: TOP-RIGHT SETTINGS MODAL (Auto-hides granted permissions + Keyboard-safe!) */}
+      {/* MODAL 2: TOP-RIGHT SETTINGS MODAL (Auto-hides granted permissions)    */}
       {/* ===================================================================== */}
       <Modal
         visible={settingsModalVisible}
@@ -1877,7 +1929,7 @@ export default function StrictFocusScreen() {
               showsVerticalScrollIndicator={false}
               keyboardShouldPersistTaps="handled"
             >
-              {/* 🌟 1. System Permissions: Each row auto-hides once granted; entire block hides when all 3 are granted! */}
+              {/* 1. System Permissions: Each row auto-hides once granted; entire block hides when all 3 are granted! */}
               {!allPermsReady && (
                 <>
                   <Text
@@ -1980,7 +2032,7 @@ export default function StrictFocusScreen() {
                 allowFontScaling={false}
                 className="text-slate-400 font-bold text-xs uppercase mb-2"
               >
-                YouTube লং ভিডিও লিমিট (Shorts ও PiP অটো ব্লক)
+                YouTube লং ভিডিও ডেইলি লিমিট (ক্লাউড সিঙ্কড)
               </Text>
               <View className="bg-slate-800 p-3.5 rounded-2xl border border-slate-700 mb-4">
                 <View className="flex-row gap-2">
@@ -2078,7 +2130,7 @@ export default function StrictFocusScreen() {
       </Modal>
 
       {/* ===================================================================== */}
-      {/* MODAL 3: DAILY SCHEDULE LOCK MANAGER MODAL (Max 10h + 50m/10m Break)  */}
+      {/* MODAL 3: DAILY SCHEDULE LOCK MANAGER MODAL (Fixed + নতুন button!)     */}
       {/* ===================================================================== */}
       <Modal
         visible={scheduleModalVisible}
@@ -2091,22 +2143,26 @@ export default function StrictFocusScreen() {
             style={{ paddingBottom: Math.max(20, insets.bottom + 12) }}
             className="bg-slate-900 w-full rounded-t-[32px] px-5 pt-5 border-t border-slate-700 max-h-[88%]"
           >
+            {/* 🌟 Balanced Header: Left Title flex-1 + Well-Spaced "+ নতুন" & Close Button */}
             <View className="flex-row items-center justify-between mb-3">
-              <View>
+              <View className="flex-1 pr-3">
                 <Text
                   allowFontScaling={false}
+                  numberOfLines={1}
                   className="text-white font-black text-lg"
                 >
                   Daily Schedule Lock ({schedules.length}/4)
                 </Text>
                 <Text
                   allowFontScaling={false}
-                  className="text-slate-400 text-[11px]"
+                  numberOfLines={1}
+                  className="text-slate-400 text-[11px] mt-0.5"
                 >
-                  প্রতিটি শিডিউল সর্বোচ্চ ১০ ঘণ্টা (৬০০ মিনিট) পর্যন্ত সেট করা যাবে
+                  প্রতিটি শিডিউল সর্বোচ্চ ১০ ঘণ্টা পর্যন্ত সেট করা যাবে
                 </Text>
               </View>
-              <View className="flex-row items-center gap-2">
+
+              <View className="flex-row items-center gap-2.5 flex-shrink-0 mr-1">
                 {schedules.length < 4 && (
                   <Pressable
                     onPress={async () => {
@@ -2121,19 +2177,20 @@ export default function StrictFocusScreen() {
                       setSchedules(updated);
                       await saveAllSchedules(updated, true);
                     }}
-                    className="bg-indigo-600/20 border border-indigo-500/40 px-3 py-1.5 rounded-full"
+                    className="bg-indigo-600/25 border border-indigo-500/50 px-3.5 py-2 rounded-xl flex-row items-center"
                   >
+                    <Feather name="plus" size={13} color="#A5B4FC" />
                     <Text
                       allowFontScaling={false}
-                      className="text-indigo-300 font-bold text-xs"
+                      className="text-indigo-200 font-bold text-xs ml-1"
                     >
-                      + নতুন
+                      নতুন
                     </Text>
                   </Pressable>
                 )}
                 <Pressable
                   onPress={() => setScheduleModalVisible(false)}
-                  className="h-9 w-9 bg-slate-800 rounded-full items-center justify-center"
+                  className="h-9 w-9 bg-slate-800 rounded-full items-center justify-center border border-slate-700"
                 >
                   <Ionicons name="close" size={18} color="#94A3B8" />
                 </Pressable>
@@ -2325,8 +2382,8 @@ export default function StrictFocusScreen() {
 
             <Pressable
               onPress={() => {
-                void saveAllSchedules(schedules, false);
                 setScheduleModalVisible(false);
+                void saveAllSchedules(schedules, false);
               }}
               className="bg-indigo-600 py-3.5 rounded-2xl items-center"
             >
@@ -2335,6 +2392,96 @@ export default function StrictFocusScreen() {
                 className="text-white font-bold text-sm"
               >
                 Save & Close
+              </Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+
+      {/* ===================================================================== */}
+      {/* 🌟 NEW MODAL 5: MODERN CUSTOM SCHEDULE SAVED POPUP MODAL              */}
+      {/* ===================================================================== */}
+      <Modal
+        visible={scheduleSavedModal.visible}
+        transparent
+        animationType="fade"
+        onRequestClose={() =>
+          setScheduleSavedModal((prev) => ({ ...prev, visible: false }))
+        }
+      >
+        <View className="flex-1 bg-black/80 justify-center items-center px-6">
+          <View className="bg-[#131C31] w-full rounded-3xl p-6 border border-indigo-500/40 items-center shadow-2xl">
+            <View
+              className={`w-16 h-16 rounded-2xl items-center justify-center mb-4 border ${
+                scheduleSavedModal.hasEnabled
+                  ? "bg-emerald-500/20 border-emerald-400/50"
+                  : "bg-indigo-500/20 border-indigo-400/50"
+              }`}
+            >
+              <MaterialCommunityIcons
+                name={
+                  scheduleSavedModal.hasEnabled
+                    ? "calendar-check"
+                    : "calendar-clock"
+                }
+                size={34}
+                color={scheduleSavedModal.hasEnabled ? "#34D399" : "#818CF8"}
+              />
+            </View>
+
+            <Text
+              allowFontScaling={false}
+              className="text-white font-black text-lg text-center mb-1.5"
+            >
+              {scheduleSavedModal.hasEnabled
+                ? "Schedule Lock অ্যাক্টিভেট হয়েছে!"
+                : "Schedule ড্রাফট সেভ হয়েছে"}
+            </Text>
+
+            <Text
+              allowFontScaling={false}
+              className="text-slate-300 text-xs text-center leading-5 mb-4"
+            >
+              {scheduleSavedModal.hasEnabled
+                ? `আপনার ${scheduleSavedModal.activeCount}টি শিডিউল সচল করা হয়েছে। নির্ধারিত সময়ে প্রতিদিন অটোমেটিক কড়া লক (সর্বোচ্চ ১০ ঘণ্টা) চালু হয়ে যাবে এবং ক্লাউডে ব্যাকআপ রাখা হয়েছে।`
+                : "আপনার শিডিউল ক্লাউডে সেভ হয়েছে (বর্তমানে সুইচ অফ করা আছে)।"}
+            </Text>
+
+            <View className="w-full bg-[#0B1120] p-3 rounded-2xl border border-slate-800 flex-row items-center justify-between mb-5">
+              <View className="flex-row items-center">
+                <MaterialCommunityIcons
+                  name="coffee-outline"
+                  size={16}
+                  color="#34D399"
+                />
+                <Text
+                  allowFontScaling={false}
+                  className="text-slate-300 font-bold text-xs ml-2"
+                >
+                  ব্রেক মোড:
+                </Text>
+              </View>
+              <Text
+                allowFontScaling={false}
+                className="text-emerald-400 font-black text-xs"
+              >
+                {scheduleBreakEnabled
+                  ? "50m Lock + 10m Break ON"
+                  : "একটানা লক (No Break)"}
+              </Text>
+            </View>
+
+            <Pressable
+              onPress={() =>
+                setScheduleSavedModal((prev) => ({ ...prev, visible: false }))
+              }
+              className="w-full bg-indigo-600 py-3.5 rounded-2xl items-center active:bg-indigo-700"
+            >
+              <Text
+                allowFontScaling={false}
+                className="text-white font-black text-xs tracking-wider uppercase"
+              >
+                Awesome • ঠিক আছে
               </Text>
             </Pressable>
           </View>

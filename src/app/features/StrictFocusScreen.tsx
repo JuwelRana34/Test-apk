@@ -6,7 +6,6 @@ import { StatusBar } from "expo-status-bar";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
-  Alert,
   Animated,
   AppState,
   BackHandler,
@@ -51,6 +50,14 @@ interface ScheduleItem {
   activeDays: number[];
 }
 
+export interface StudyVideoItem {
+  id: string;
+  raw: string;
+  title: string;
+  url: string;
+  addedDate: string;
+}
+
 interface FocusSessionState {
   active: boolean;
   startTimeMillis: number;
@@ -69,12 +76,17 @@ interface FocusSessionState {
   ytUsedSeconds?: number;
   ytUsedMinutes: number;
   ytLimitMinutes: number;
+  ytStudyUsedSeconds?: number;
+  ytStudyLimitMinutes?: number;
+  studyChannelsCsv?: string;
+  studyVideosJson?: string;
   ytUsageDate?: string;
   lastCompletedDate?: string;
   completedHistoryJson?: string;
 }
 
 interface NativeFocusLock {
+  applyDarkNavigationBar?: () => Promise<boolean>;
   isAccessibilityServiceEnabled: () => Promise<boolean>;
   openAccessibilitySettings: () => Promise<boolean>;
   isOverlayPermissionGranted?: () => Promise<boolean>;
@@ -87,6 +99,12 @@ interface NativeFocusLock {
   saveAllowedApps: (apps: string[]) => Promise<boolean>;
   saveAllowedDomains?: (domains: string[]) => Promise<boolean>;
   setYouTubeLimitMinutes?: (limitMinutes: number) => Promise<boolean>;
+  setStudyYouTubeConfig?: (
+    studyLimitMinutes: number,
+    channels: string[],
+    videosJson: string,
+  ) => Promise<boolean>;
+  openStudyYouTubeItem?: (urlOrQuery: string) => Promise<boolean>;
   setScheduleBreakEnabled?: (enabled: boolean) => Promise<boolean>;
   openApp: (packageName: string) => Promise<boolean>;
   openUrlInChrome?: (domainOrUrl: string) => Promise<boolean>;
@@ -138,8 +156,11 @@ const DAYS = [
 
 const MAX_SELECTED_APPS = 6;
 const MAX_ALLOWED_DOMAINS = 5;
+const MAX_STUDY_CHANNELS = 5;
+const MAX_STUDY_VIDEOS = 5;
 const MAX_SESSION_MINUTES = 360; // Max 6 Hours for Session Lock
-const MAX_SCHEDULE_MINUTES = 600; // Max 10 Hours for Schedule Lock
+const MAX_SCHEDULE_MINUTES = 900; // Max 15 Hours for Schedule Lock
+const WARN_SCHEDULE_MINUTES = 600; // Warn when Schedule Lock > 10 Hours (or >= 12h)
 
 const DEFAULT_ALLOWED_DOMAINS = [
   "github.com",
@@ -165,7 +186,6 @@ const getAppColor = (name: string) => {
   return colors[name.length % colors.length];
 };
 
-// Calculate schedule duration in minutes across midnight
 const getScheduleDurationMinutes = (start: Date, end: Date): number => {
   const startMins = start.getHours() * 60 + start.getMinutes();
   const endMins = end.getHours() * 60 + end.getMinutes();
@@ -176,13 +196,34 @@ const getScheduleDurationMinutes = (start: Date, end: Date): number => {
   return diff;
 };
 
+const formatVideoDisplayLabel = (raw: string): string => {
+  const trimmed = raw.trim();
+  if (trimmed.includes("youtu.be/")) {
+    const id = trimmed.split("youtu.be/")[1]?.split(/[?&]/)[0] || "Video";
+    return `Class (${id.slice(0, 8)})`;
+  }
+  if (trimmed.includes("watch?v=")) {
+    const id = trimmed.split("watch?v=")[1]?.split(/[?&]/)[0] || "Video";
+    return `Class (${id.slice(0, 8)})`;
+  }
+  return trimmed.length > 26 ? `${trimmed.slice(0, 24)}...` : trimmed;
+};
+
 export default function StrictFocusScreen() {
   const insets = useSafeAreaInsets();
 
   const [customDuration, setCustomDuration] = useState("60");
   const [pomodoroEnabled, setPomodoroEnabled] = useState(true);
   const [scheduleBreakEnabled, setScheduleBreakEnabledState] = useState(true);
-  const [ytLimitMinutes, setYtLimitMinutes] = useState(90);
+
+  // Dual YouTube Quota State: General YT (15m / 30m / 45m) + Study YT (90m / 150m / 210m)
+  const [ytLimitMinutes, setYtLimitMinutes] = useState(30);
+  const [ytStudyLimitMinutes, setYtStudyLimitMinutes] = useState(210);
+  const [studyTab, setStudyTab] = useState<"channels" | "videos">("channels");
+  const [studyChannels, setStudyChannels] = useState<string[]>([]);
+  const [studyVideos, setStudyVideos] = useState<StudyVideoItem[]>([]);
+  const [newStudyInput, setNewStudyInput] = useState("");
+
   const [keyboardHeight, setKeyboardHeight] = useState(0);
 
   const [permState, setPermState] = useState({
@@ -211,6 +252,40 @@ export default function StrictFocusScreen() {
     hasEnabled: boolean;
     activeCount: number;
   }>({ visible: false, hasEnabled: false, activeCount: 0 });
+
+  // Universal Modern Custom Popup Modal (Replaces ALL default Alert.alert!)
+  const [uiModal, setUiModal] = useState<{
+    visible: boolean;
+    title: string;
+    message: string;
+    icon: keyof typeof MaterialCommunityIcons.glyphMap;
+    color: string;
+    confirmText?: string;
+    cancelText?: string;
+    onConfirm?: () => void;
+  }>({
+    visible: false,
+    title: "",
+    message: "",
+    icon: "shield-alert-outline",
+    color: "#818CF8",
+  });
+
+  const showModernNotice = (
+    title: string,
+    message: string,
+    icon: keyof typeof MaterialCommunityIcons.glyphMap = "information-outline",
+    color = "#818CF8",
+  ) => {
+    setUiModal({
+      visible: true,
+      title,
+      message,
+      icon,
+      color,
+    });
+  };
+
   const [spendingPass, setSpendingPass] = useState(false);
 
   const [schedules, setSchedules] = useState<ScheduleItem[]>([
@@ -237,6 +312,7 @@ export default function StrictFocusScreen() {
   const [emergencyPasses, setEmergencyPasses] = useState(0);
   const [streakDays, setStreakDays] = useState(0);
   const [ytUsedSeconds, setYtUsedSeconds] = useState(0);
+  const [ytStudyUsedSeconds, setYtStudyUsedSeconds] = useState(0);
 
   const fillAnim = useRef(new Animated.Value(0)).current;
   const scaleAnim = useRef(new Animated.Value(1)).current;
@@ -244,7 +320,6 @@ export default function StrictFocusScreen() {
   const isHoldPressActiveRef = useRef(false);
   const wasActiveSessionRef = useRef(false);
 
-  // Track Android/iOS soft keyboard height so inputs inside Modals never get covered!
   useEffect(() => {
     const showSub = Keyboard.addListener("keyboardDidShow", (e) => {
       setKeyboardHeight(e.endCoordinates?.height || 0);
@@ -287,7 +362,6 @@ export default function StrictFocusScreen() {
         ? Math.max(0, session.endTimeMillis - Date.now())
         : 0;
 
-      // If session just completed naturally, immediately sync totalCompleted & streak to Supabase Cloud!
       if (wasActiveSessionRef.current && !active) {
         wasActiveSessionRef.current = false;
         void syncLocalDataToCloudIfOnline();
@@ -303,7 +377,6 @@ export default function StrictFocusScreen() {
       }
       setIsBreakActive(!!session.isBreakActive);
       setNoMoreBreaks(!!session.noMoreBreaks);
-      // Never allow cycleRemainingMillis to exceed totalRem!
       setCycleRemainingMillis(
         Math.min(totalRem, Math.max(0, session.cycleRemainingMillis || 0)),
       );
@@ -312,6 +385,7 @@ export default function StrictFocusScreen() {
       setYtUsedSeconds(
         session.ytUsedSeconds ?? (session.ytUsedMinutes ?? 0) * 60,
       );
+      setYtStudyUsedSeconds(session.ytStudyUsedSeconds ?? 0);
     } catch {}
   }, []);
 
@@ -380,20 +454,43 @@ export default function StrictFocusScreen() {
     }
   };
 
+  const syncStudyConfigToNative = async (
+    sLimit: number,
+    channels: string[],
+    videos: StudyVideoItem[],
+  ) => {
+    if (Platform.OS === "android" && FocusLock?.setStudyYouTubeConfig) {
+      try {
+        await FocusLock.setStudyYouTubeConfig(
+          sLimit,
+          channels,
+          JSON.stringify(videos),
+        );
+      } catch {}
+    }
+  };
+
   const loadSettings = async () => {
     try {
+      const todayIso = new Date().toISOString().split("T")[0];
       const [
         savedApps,
         savedDomains,
         savedSchedules,
         savedYtLimit,
         savedSchedBreak,
+        savedStudyLimit,
+        savedStudyChannels,
+        savedStudyVideos,
       ] = await Promise.all([
         AsyncStorage.getItem("@focus_allowed_apps"),
         AsyncStorage.getItem("@focus_allowed_domains"),
         AsyncStorage.getItem("@focus_multi_schedules"),
         AsyncStorage.getItem("@focus_yt_limit_minutes"),
         AsyncStorage.getItem("@focus_schedule_break_enabled"),
+        AsyncStorage.getItem("@focus_yt_study_limit_minutes"),
+        AsyncStorage.getItem("@focus_yt_study_channels"),
+        AsyncStorage.getItem("@focus_yt_study_videos"),
       ]);
 
       let parsedApps: string[] = [];
@@ -403,6 +500,8 @@ export default function StrictFocusScreen() {
         if (FocusLock?.saveAllowedApps) {
           await FocusLock.saveAllowedApps(parsedApps);
         }
+      } else {
+        setSelectedApps([]);
       }
 
       if (savedDomains) {
@@ -417,15 +516,60 @@ export default function StrictFocusScreen() {
         if (FocusLock?.saveAllowedDomains) {
           await FocusLock.saveAllowedDomains(parsedDomains);
         }
-      } else if (FocusLock?.saveAllowedDomains) {
-        await FocusLock.saveAllowedDomains(DEFAULT_ALLOWED_DOMAINS);
+      } else {
+        setAllowedDomains(DEFAULT_ALLOWED_DOMAINS);
+        if (FocusLock?.saveAllowedDomains) {
+          await FocusLock.saveAllowedDomains(DEFAULT_ALLOWED_DOMAINS);
+        }
       }
 
-      let currentYtLimit = 90;
+      let currentYtLimit = 30;
       if (savedYtLimit) {
-        currentYtLimit = parseInt(savedYtLimit, 10) || 90;
-        setYtLimitMinutes(currentYtLimit);
+        const rawLim = parseInt(savedYtLimit, 10) || 30;
+        currentYtLimit = [15, 30, 45].includes(rawLim) ? rawLim : 30;
       }
+      setYtLimitMinutes(currentYtLimit);
+      if (FocusLock?.setYouTubeLimitMinutes) {
+        await FocusLock.setYouTubeLimitMinutes(currentYtLimit);
+      }
+
+      let currentStudyLimit = 210;
+      if (savedStudyLimit) {
+        const rawSLim = parseInt(savedStudyLimit, 10) || 210;
+        currentStudyLimit = [90, 150, 210].includes(rawSLim) ? rawSLim : 210;
+      }
+      setYtStudyLimitMinutes(currentStudyLimit);
+
+      let parsedChannels: string[] = [];
+      if (savedStudyChannels) {
+        parsedChannels = JSON.parse(savedStudyChannels).slice(
+          0,
+          MAX_STUDY_CHANNELS,
+        );
+      }
+      setStudyChannels(parsedChannels);
+
+      // Auto-clear yesterday's class videos at midnight!
+      let parsedVideos: StudyVideoItem[] = [];
+      if (savedStudyVideos) {
+        const rawVids: StudyVideoItem[] = JSON.parse(savedStudyVideos);
+        parsedVideos = rawVids
+          .filter((v) => v.addedDate === todayIso)
+          .slice(0, MAX_STUDY_VIDEOS);
+        if (parsedVideos.length !== rawVids.length) {
+          await AsyncStorage.setItem(
+            "@focus_yt_study_videos",
+            JSON.stringify(parsedVideos),
+          );
+        }
+      }
+      setStudyVideos(parsedVideos);
+
+      await syncStudyConfigToNative(
+        currentStudyLimit,
+        parsedChannels,
+        parsedVideos,
+      );
 
       if (savedSchedBreak !== null) {
         const enabled = savedSchedBreak === "true";
@@ -445,7 +589,6 @@ export default function StrictFocusScreen() {
           }));
           setSchedules(hydrated);
 
-          // Ensure native AlarmManager has the restored schedules registered!
           if (FocusLock?.setAdvancedSchedules) {
             const hasEnabled = hydrated.some((s) => s.isEnabled);
             const formatted = hydrated.map((s) => ({
@@ -496,9 +639,11 @@ export default function StrictFocusScreen() {
       const mime = (asset.mimeType || "").toLowerCase();
 
       if (!fileName.endsWith(".pdf") && mime !== "application/pdf") {
-        Alert.alert(
+        showModernNotice(
           "শুধুমাত্র PDF ফাইল অনুমোদিত",
           "লক চলাকালীন শুধুমাত্র পড়াশোনার .pdf ফাইল ওপেন করা যাবে।",
+          "file-alert-outline",
+          "#F43F5E",
         );
         return;
       }
@@ -509,9 +654,11 @@ export default function StrictFocusScreen() {
         await Linking.openURL(asset.uri);
       }
     } catch {
-      Alert.alert(
+      showModernNotice(
         "PDF ওপেন করা যায়নি",
         "ফোনে News Plus বা Google Drive PDF Viewer ইনস্টল করা আছে কি না চেক করুন।",
+        "file-pdf-box",
+        "#F43F5E",
       );
     }
   };
@@ -525,9 +672,11 @@ export default function StrictFocusScreen() {
 
     if (!ovl || !acc) {
       setSettingsModalVisible(true);
-      Alert.alert(
+      showModernNotice(
         "সিস্টেম পারমিশন প্রয়োজন",
         "লক চালু করার আগে Settings থেকে প্রয়োজনীয় সিস্টেম পারমিশনগুলো অন করুন।",
+        "shield-alert-outline",
+        "#F43F5E",
       );
       return false;
     }
@@ -554,78 +703,119 @@ export default function StrictFocusScreen() {
       : `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
   };
 
-  const formatYtLiveUsage = (usedSecs: number, limitMins: number) => {
+  const formatYtCompact = (usedSecs: number, limitMins: number) => {
     const m = Math.floor(usedSecs / 60);
     const s = usedSecs % 60;
     return `${m}m ${String(s).padStart(2, "0")}s / ${limitMins}m`;
   };
 
+  // Core Schedule Saver (with Max 15h Hard Cap + 10h/12h Smart Warning Confirmation Modal!)
+  const commitSchedulesToStorageAndNative = async (
+    schedulesToSave: ScheduleItem[],
+    silent: boolean,
+  ) => {
+    if (!FocusLock) return;
+    const enabledCount = schedulesToSave.filter((s) => s.isEnabled).length;
+    const hasEnabled = enabledCount > 0;
+
+    if (hasEnabled && !(await verifyRequiredPermissionsBeforeLock())) {
+      return;
+    }
+
+    await AsyncStorage.setItem(
+      "@focus_multi_schedules",
+      JSON.stringify(schedulesToSave),
+    );
+    await FocusLock.saveAllowedApps(selectedApps);
+    if (FocusLock.saveAllowedDomains) {
+      await FocusLock.saveAllowedDomains(allowedDomains);
+    }
+
+    const formattedSchedules = schedulesToSave.map((s) => ({
+      isEnabled: s.isEnabled,
+      startHour: s.startTime.getHours(),
+      startMinute: s.startTime.getMinutes(),
+      endHour: s.endTime.getHours(),
+      endMinute: s.endTime.getMinutes(),
+      activeDays: s.activeDays,
+    }));
+
+    if (FocusLock.setAdvancedSchedules) {
+      await FocusLock.setAdvancedSchedules(
+        JSON.stringify(formattedSchedules),
+        hasEnabled,
+        selectedApps,
+        ytLimitMinutes,
+      );
+    }
+
+    void syncLocalDataToCloudIfOnline();
+
+    if (!silent) {
+      Vibration.vibrate(100);
+      setScheduleSavedModal({
+        visible: true,
+        hasEnabled,
+        activeCount: enabledCount,
+      });
+    }
+  };
+
   const saveAllSchedules = async (
     schedulesToSave = schedules,
     silent = false,
+    skipLongDurationWarning = false,
   ): Promise<void> => {
     try {
       if (!FocusLock) return;
 
-      // Enforce Max 10 Hours (600 minutes) per Schedule Lock!
+      let longestLongSchedHours: string | null = null;
+
+      // 1. Check Hard Cap: Max 15 Hours (900 minutes)
       for (let i = 0; i < schedulesToSave.length; i++) {
         const s = schedulesToSave[i];
         const durMins = getScheduleDurationMinutes(s.startTime, s.endTime);
         if (durMins > MAX_SCHEDULE_MINUTES) {
-          Alert.alert(
-            "সর্বোচ্চ ১০ ঘণ্টার সীমা (Schedule Limit)",
-            `Schedule ${i + 1}-এর সময়কাল ${(durMins / 60).toFixed(1)} ঘণ্টা দেওয়া হয়েছে। নিরাপত্তার জন্য Schedule Lock একটানা সর্বোচ্চ ১০ ঘণ্টার (৬০০ মিনিট) বেশি সেট করা যাবে না।`,
+          showModernNotice(
+            "সর্বোচ্চ ১৫ ঘণ্টার সীমা (Max 15h)",
+            `Schedule ${i + 1}-এর সময়কাল ${(durMins / 60).toFixed(1)} ঘণ্টা দেওয়া হয়েছে। নিরাপত্তার জন্য Schedule Lock একটানা সর্বোচ্চ ১৫ ঘণ্টার (৯০০ মিনিট) বেশি সেট করা যাবে না।`,
+            "clock-alert-outline",
+            "#F43F5E",
           );
           return;
         }
+        // 2. Check Warning Threshold: > 10 Hours (600m) / >= 12 Hours (720m)
+        if (durMins > WARN_SCHEDULE_MINUTES && s.isEnabled) {
+          longestLongSchedHours = (durMins / 60).toFixed(1);
+        }
       }
 
-      const enabledCount = schedulesToSave.filter((s) => s.isEnabled).length;
-      const hasEnabled = enabledCount > 0;
-
-      if (hasEnabled && !(await verifyRequiredPermissionsBeforeLock())) {
+      if (longestLongSchedHours && !skipLongDurationWarning && !silent) {
+        setUiModal({
+          visible: true,
+          title: "দীর্ঘ শিডিউল লকের সতর্কতা!",
+          message: `আপনি ${longestLongSchedHours} ঘণ্টার একটি দীর্ঘ Schedule Lock চালু করেছেন (১০/১২ ঘণ্টার বেশি)। এই সময়ে ফোন কড়া লকে থাকবে (৫০ মিনিট লক + ১০ মিনিট ব্রেক)। আপনি কি নিশ্চিতভাবে এটি সেভ করতে চান?`,
+          icon: "alert-decagram-outline",
+          color: "#FBBF24",
+          cancelText: "সময় কমান",
+          confirmText: "হ্যাঁ, নিশ্চিত করুন",
+          onConfirm: () => {
+            void commitSchedulesToStorageAndNative(schedulesToSave, false);
+          },
+        });
         return;
       }
 
-      await AsyncStorage.setItem(
-        "@focus_multi_schedules",
-        JSON.stringify(schedulesToSave),
-      );
-      await FocusLock.saveAllowedApps(selectedApps);
-      if (FocusLock.saveAllowedDomains) {
-        await FocusLock.saveAllowedDomains(allowedDomains);
-      }
-
-      const formattedSchedules = schedulesToSave.map((s) => ({
-        isEnabled: s.isEnabled,
-        startHour: s.startTime.getHours(),
-        startMinute: s.startTime.getMinutes(),
-        endHour: s.endTime.getHours(),
-        endMinute: s.endTime.getMinutes(),
-        activeDays: s.activeDays,
-      }));
-
-      if (FocusLock.setAdvancedSchedules) {
-        await FocusLock.setAdvancedSchedules(
-          JSON.stringify(formattedSchedules),
-          hasEnabled,
-          selectedApps,
-          ytLimitMinutes,
+      await commitSchedulesToStorageAndNative(schedulesToSave, silent);
+    } catch {
+      if (!silent) {
+        showModernNotice(
+          "সেভ করা যায়নি",
+          "শিডিউল সেভ করতে সমস্যা হয়েছে, আবার চেষ্টা করুন।",
+          "alert-circle-outline",
+          "#F43F5E",
         );
       }
-
-      void syncLocalDataToCloudIfOnline();
-
-      if (!silent) {
-        Vibration.vibrate(100);
-        setScheduleSavedModal({
-          visible: true,
-          hasEnabled,
-          activeCount: enabledCount,
-        });
-      }
-    } catch {
-      if (!silent) Alert.alert("Error", "Could not save schedules.");
     }
   };
 
@@ -633,16 +823,23 @@ export default function StrictFocusScreen() {
     if (isStartingFocusRef.current) return;
     const parsedDuration = parseInt(customDuration, 10);
     if (isNaN(parsedDuration) || parsedDuration <= 0) {
-      Alert.alert("সময় সঠিক নয়", "কত মিনিট লক করতে চান তা সঠিকভাবে লিখুন।");
+      showModernNotice(
+        "সময় সঠিক নয়",
+        "কত মিনিট লক করতে চান তা সঠিকভাবে লিখুন।",
+        "timer-alert-outline",
+        "#F43F5E",
+      );
       return;
     }
 
     // Enforce Max 6 Hours (360 minutes) for Session Lock!
     if (parsedDuration > MAX_SESSION_MINUTES) {
       setCustomDuration(String(MAX_SESSION_MINUTES));
-      Alert.alert(
+      showModernNotice(
         "সর্বোচ্চ ৬ ঘণ্টার সীমা (Session Limit)",
         "নিরাপত্তার জন্য Session Lock একটানা সর্বোচ্চ ৬ ঘণ্টা (৩৬০ মিনিট) পর্যন্ত দেওয়া যাবে। সময় ৩৬০ মিনিটে সেট করা হয়েছে।",
+        "clock-alert-outline",
+        "#FBBF24",
       );
       return;
     }
@@ -671,7 +868,12 @@ export default function StrictFocusScreen() {
       void syncLocalDataToCloudIfOnline();
       await refreshFocusSession();
     } catch {
-      Alert.alert("Error", "Could not start Session Lock.");
+      showModernNotice(
+        "লক চালু করা যায়নি",
+        "সিস্টেম পারমিশনগুলো ঠিকমতো অন আছে কি না চেক করুন।",
+        "alert-circle-outline",
+        "#F43F5E",
+      );
     } finally {
       isStartingFocusRef.current = false;
     }
@@ -680,11 +882,13 @@ export default function StrictFocusScreen() {
   const handleEmergencyUnlockConfirm = async () => {
     if (!FocusLock?.useEmergencyPass) return;
     if (emergencyPasses <= 0) {
-      Alert.alert(
+      setEmergencyModalVisible(false);
+      showModernNotice(
         "কোনো Emergency Pass নেই",
         "আপনার কাছে এখন ০টি পাস আছে। টানা ৩ দিন (কমপক্ষে ৩০ মিনিট করে) নিয়ম মেনে লক পূর্ণ করলে ১টি Emergency Pass পাবেন!",
+        "ticket-confirmation-outline",
+        "#FBBF24",
       );
-      setEmergencyModalVisible(false);
       return;
     }
 
@@ -692,9 +896,12 @@ export default function StrictFocusScreen() {
     try {
       const canSpendOnline = await spendEmergencyPassWithCloudCheck();
       if (!canSpendOnline) {
-        Alert.alert(
+        setEmergencyModalVisible(false);
+        showModernNotice(
           "ইন্টারনেট সংযোগ প্রয়োজন",
           "Emergency Pass ব্যবহার করে লক আনলক করার জন্য ফোনের ইন্টারনেট (Wi-Fi বা Mobile Data) চালু করুন।",
+          "wifi-off",
+          "#F43F5E",
         );
         return;
       }
@@ -715,7 +922,13 @@ export default function StrictFocusScreen() {
         });
       }
     } catch {
-      Alert.alert("Error", "Emergency Pass ব্যবহার করা যায়নি।");
+      setEmergencyModalVisible(false);
+      showModernNotice(
+        "আনলক করা যায়নি",
+        "Emergency Pass ব্যবহার করতে সমস্যা হয়েছে।",
+        "alert-circle-outline",
+        "#F43F5E",
+      );
     } finally {
       setSpendingPass(false);
     }
@@ -726,9 +939,11 @@ export default function StrictFocusScreen() {
       setSelectedApps((prev) => prev.filter((p) => p !== pkg));
     } else {
       if (selectedApps.length >= MAX_SELECTED_APPS) {
-        Alert.alert(
+        showModernNotice(
           "সর্বোচ্চ ৬টি অ্যাপ সিলেক্ট করা যাবে",
           "ফোকাস ধরে রাখতে লক চলাকালীন সর্বোচ্চ ৬টি জরুরি অ্যাপ ব্যবহারের অনুমতি দেওয়া যাবে।",
+          "apps",
+          "#FBBF24",
         );
         return;
       }
@@ -765,18 +980,22 @@ export default function StrictFocusScreen() {
     }
 
     if (clean.includes("youtube.") || clean.includes("youtu.be")) {
-      Alert.alert(
-        "YouTube যোগ করা যাবে না",
-        "Chrome-এ YouTube ওয়েবসাইট যোগ করা নিষিদ্ধ! লং ভিডিও দেখতে চাইলে অ্যাপ লিস্ট থেকে সরাসরি YouTube অ্যাপ সিলেক্ট করুন।",
-      );
       setNewDomainInput("");
+      showModernNotice(
+        "Chrome-এ YouTube নিষিদ্ধ",
+        "Chrome-এ YouTube ওয়েবসাইট যোগ করা যাবে না! ক্লাসের বা লং ভিডিও দেখতে নিচের YouTube Study Mode ব্যবহার করুন।",
+        "youtube",
+        "#F43F5E",
+      );
       return;
     }
 
     if (allowedDomains.length >= MAX_ALLOWED_DOMAINS) {
-      Alert.alert(
+      showModernNotice(
         "সর্বোচ্চ ৫টি ওয়েবসাইট লিমিট",
         "ফোকাস ধরে রাখতে Chrome-এ সর্বোচ্চ ৫টি জরুরি ওয়েবসাইট যোগ করা যাবে। নতুন সাইট যোগ করতে আগের কোনোটি মুছে ফেলুন।",
+        "web",
+        "#FBBF24",
       );
       return;
     }
@@ -819,6 +1038,108 @@ export default function StrictFocusScreen() {
       await FocusLock.setYouTubeLimitMinutes(mins);
     }
     void syncLocalDataToCloudIfOnline();
+  };
+
+  // 🌟 Study YouTube Mode Handlers (Study Limit + Permanent Channels + Daily Auto-Clearing Class Videos)
+  const updateStudyYtQuota = async (mins: number) => {
+    setYtStudyLimitMinutes(mins);
+    await AsyncStorage.setItem("@focus_yt_study_limit_minutes", String(mins));
+    await syncStudyConfigToNative(mins, studyChannels, studyVideos);
+    void syncLocalDataToCloudIfOnline();
+  };
+
+  const addStudyItem = async () => {
+    const clean = newStudyInput.trim();
+    if (!clean) return;
+
+    if (studyTab === "channels") {
+      if (studyChannels.length >= MAX_STUDY_CHANNELS) {
+        showModernNotice(
+          "সর্বোচ্চ ৫টি স্টাডি চ্যানেল",
+          "স্থায়ীভাবে সর্বোচ্চ ৫টি ক্লাসের চ্যানেল যুক্ত করা যাবে। নতুন চ্যানেল যোগ করতে আগের কোনোটি মুছে ফেলুন।",
+          "school-outline",
+          "#FBBF24",
+        );
+        return;
+      }
+      const chName = clean
+        .replace(/^https?:\/\/(www\.)?youtube\.com\/@?/i, "")
+        .replace(/\/.*$/, "")
+        .trim();
+      if (!chName || studyChannels.some((c) => c.toLowerCase() === chName.toLowerCase())) {
+        setNewStudyInput("");
+        return;
+      }
+      const updated = [...studyChannels, chName];
+      setStudyChannels(updated);
+      setNewStudyInput("");
+      await AsyncStorage.setItem(
+        "@focus_yt_study_channels",
+        JSON.stringify(updated),
+      );
+      await syncStudyConfigToNative(ytStudyLimitMinutes, updated, studyVideos);
+      void syncLocalDataToCloudIfOnline();
+    } else {
+      if (studyVideos.length >= MAX_STUDY_VIDEOS) {
+        showModernNotice(
+          "সর্বোচ্চ ৫টি ক্লাস ভিডিও",
+          "আজকের ক্লাসের জন্য সর্বোচ্চ ৫টি ভিডিও লিঙ্ক বা নাম যোগ করা যাবে।",
+          "play-box-multiple-outline",
+          "#FBBF24",
+        );
+        return;
+      }
+      const todayIso = new Date().toISOString().split("T")[0];
+      const isUrl =
+        clean.startsWith("http://") ||
+        clean.startsWith("https://") ||
+        clean.includes("youtu.be/") ||
+        clean.includes("youtube.com/");
+      const newVid: StudyVideoItem = {
+        id: Date.now().toString(),
+        raw: clean,
+        title: formatVideoDisplayLabel(clean),
+        url: isUrl
+          ? clean.startsWith("http")
+            ? clean
+            : `https://${clean}`
+          : `https://www.youtube.com/results?search_query=${encodeURIComponent(clean)}`,
+        addedDate: todayIso,
+      };
+      const updated = [...studyVideos, newVid];
+      setStudyVideos(updated);
+      setNewStudyInput("");
+      await AsyncStorage.setItem(
+        "@focus_yt_study_videos",
+        JSON.stringify(updated),
+      );
+      await syncStudyConfigToNative(
+        ytStudyLimitMinutes,
+        studyChannels,
+        updated,
+      );
+    }
+  };
+
+  const removeStudyChannel = async (ch: string) => {
+    const updated = studyChannels.filter((c) => c !== ch);
+    setStudyChannels(updated);
+    await AsyncStorage.setItem(
+      "@focus_yt_study_channels",
+      JSON.stringify(updated),
+    );
+    await syncStudyConfigToNative(ytStudyLimitMinutes, updated, studyVideos);
+    void syncLocalDataToCloudIfOnline();
+  };
+
+  const removeStudyVideo = async (id: string) => {
+    const updated = studyVideos.filter((v) => v.id !== id);
+    setStudyVideos(updated);
+    await AsyncStorage.setItem(
+      "@focus_yt_study_videos",
+      JSON.stringify(updated),
+    );
+    await syncStudyConfigToNative(ytStudyLimitMinutes, studyChannels, updated);
   };
 
   const handlePressIn = () => {
@@ -868,16 +1189,22 @@ export default function StrictFocusScreen() {
     (lockMode === "SESSION" && pomodoroEnabled) ||
     (lockMode === "SCHEDULE" && scheduleBreakEnabled);
 
+  const studyHoursText = (ytStudyLimitMinutes / 60)
+    .toFixed(1)
+    .replace(".0", "");
+
   // =========================================================================
-  // 1. ACTIVE LOCK SCREEN DASHBOARD (With Smart Break Timer & Read Study PDF!)
+  // 1. ACTIVE LOCK SCREEN DASHBOARD (With Dual YouTube Quota + Direct Class Launcher!)
   // =========================================================================
   if (isFocusActive) {
+    const hasStudyItems = studyVideos.length > 0 || studyChannels.length > 0;
+
     return (
       <SafeAreaView
         className="flex-1 bg-[#070B14]"
         edges={["top", "bottom", "left", "right"]}
       >
-        <StatusBar style="light" />
+        <StatusBar style="light" backgroundColor="#070B14" />
         <ScrollView
           contentContainerStyle={{
             flexGrow: 1,
@@ -940,8 +1267,8 @@ export default function StrictFocusScreen() {
             </View>
           </View>
 
-          {/* Center Lock / Break Status (With Smart Timer Clamping!) */}
-          <View className="items-center my-2.5">
+          {/* Center Lock / Break Status */}
+          <View className="items-center my-2">
             <View
               className={`p-4 rounded-full items-center justify-center border-2 ${
                 isBreakActive
@@ -951,14 +1278,14 @@ export default function StrictFocusScreen() {
             >
               <MaterialCommunityIcons
                 name={isBreakActive ? "coffee-outline" : "shield-lock"}
-                size={36}
+                size={34}
                 color={isBreakActive ? "#34D399" : "#F43F5E"}
               />
             </View>
 
             <Text
               allowFontScaling={false}
-              className="text-white text-xl font-black mt-2.5 text-center px-2"
+              className="text-white text-xl font-black mt-2 text-center px-2"
             >
               {isBreakActive
                 ? lockMode === "SCHEDULE"
@@ -978,7 +1305,7 @@ export default function StrictFocusScreen() {
 
             <Text
               allowFontScaling={false}
-              className={`text-4xl font-black mt-2.5 tracking-widest ${
+              className={`text-4xl font-black mt-2 tracking-widest ${
                 isBreakActive ? "text-emerald-400" : "text-rose-400"
               }`}
             >
@@ -1004,9 +1331,9 @@ export default function StrictFocusScreen() {
             )}
           </View>
 
-          {/* Middle Section: Read Study PDF Button + Live YT Seconds + Allowed Apps + Chrome Links */}
+          {/* Middle Section: Read Study PDF Button + Dual YouTube Card + Allowed Apps + Chrome Links */}
           <View>
-            {/* Read Study PDF Button (.pdf-only picker + News Plus / Drive PDF Viewer) */}
+            {/* Read Study PDF Button */}
             <Pressable
               onPress={() => void handlePickAndReadStudyPdf()}
               className="bg-sky-500/15 border border-sky-500/40 rounded-2xl p-3 mb-2.5 flex-row items-center justify-between active:bg-sky-500/25"
@@ -1046,24 +1373,110 @@ export default function StrictFocusScreen() {
               </View>
             </Pressable>
 
-            {/* Live YouTube Usage Counter */}
-            <View className="bg-slate-900/90 border border-slate-800 rounded-2xl p-3 mb-2.5 flex-row items-center justify-between">
-              <View className="flex-row items-center flex-1 pr-2">
-                <Ionicons name="logo-youtube" size={16} color="#EF4444" />
-                <Text
-                  allowFontScaling={false}
-                  numberOfLines={1}
-                  className="text-slate-300 text-xs font-bold ml-2 flex-1"
-                >
-                  YouTube Long Video (Shorts & PiP Off)
-                </Text>
+            {/* 🌟 Dual YouTube Live Usage Card (General YT + Study Class YT + 1-Tap Class Launcher!) */}
+            <View className="bg-slate-900/90 border border-slate-800 rounded-2xl p-3 mb-2.5">
+              <View className="flex-row items-center justify-between">
+                <View className="flex-1 flex-row items-center pr-2">
+                  <Ionicons name="logo-youtube" size={15} color="#EF4444" />
+                  <View className="ml-2 flex-1">
+                    <Text
+                      allowFontScaling={false}
+                      numberOfLines={1}
+                      className="text-slate-400 text-[10px] font-bold"
+                    >
+                      General YT
+                    </Text>
+                    <Text
+                      allowFontScaling={false}
+                      numberOfLines={1}
+                      className="text-rose-400 text-xs font-black"
+                    >
+                      {formatYtCompact(ytUsedSeconds, ytLimitMinutes)}
+                    </Text>
+                  </View>
+                </View>
+
+                <View className="w-[1px] h-7 bg-slate-800 mx-2" />
+
+                <View className="flex-1 flex-row items-center pl-1">
+                  <MaterialCommunityIcons
+                    name="school"
+                    size={16}
+                    color="#34D399"
+                  />
+                  <View className="ml-2 flex-1">
+                    <Text
+                      allowFontScaling={false}
+                      numberOfLines={1}
+                      className="text-slate-400 text-[10px] font-bold"
+                    >
+                      Study Class YT
+                    </Text>
+                    <Text
+                      allowFontScaling={false}
+                      numberOfLines={1}
+                      className="text-emerald-400 text-xs font-black"
+                    >
+                      {formatYtCompact(ytStudyUsedSeconds, ytStudyLimitMinutes)}
+                    </Text>
+                  </View>
+                </View>
               </View>
-              <Text
-                allowFontScaling={false}
-                className="text-indigo-400 text-xs font-black"
-              >
-                {formatYtLiveUsage(ytUsedSeconds, ytLimitMinutes)}
-              </Text>
+
+              {hasStudyItems && (
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  className="mt-2.5 pt-2 border-t border-slate-800"
+                  contentContainerStyle={{ gap: 8 }}
+                >
+                  {studyVideos.map((vid) => (
+                    <Pressable
+                      key={vid.id}
+                      onPress={() => {
+                        if (FocusLock?.openStudyYouTubeItem) {
+                          void FocusLock.openStudyYouTubeItem(vid.url);
+                        }
+                      }}
+                      className="bg-emerald-500/15 border border-emerald-500/40 px-2.5 py-1.5 rounded-xl flex-row items-center active:bg-emerald-500/30"
+                    >
+                      <Feather name="play-circle" size={12} color="#34D399" />
+                      <Text
+                        allowFontScaling={false}
+                        numberOfLines={1}
+                        className="text-emerald-300 font-bold text-[11px] ml-1.5"
+                      >
+                        {vid.title}
+                      </Text>
+                    </Pressable>
+                  ))}
+
+                  {studyChannels.map((ch) => (
+                    <Pressable
+                      key={ch}
+                      onPress={() => {
+                        if (FocusLock?.openStudyYouTubeItem) {
+                          void FocusLock.openStudyYouTubeItem(ch);
+                        }
+                      }}
+                      className="bg-indigo-500/15 border border-indigo-500/40 px-2.5 py-1.5 rounded-xl flex-row items-center active:bg-indigo-500/30"
+                    >
+                      <MaterialCommunityIcons
+                        name="school-outline"
+                        size={13}
+                        color="#818CF8"
+                      />
+                      <Text
+                        allowFontScaling={false}
+                        numberOfLines={1}
+                        className="text-indigo-200 font-bold text-[11px] ml-1.5"
+                      >
+                        {ch}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </ScrollView>
+              )}
             </View>
 
             {/* Allowed Apps Grid */}
@@ -1195,11 +1608,11 @@ export default function StrictFocusScreen() {
           animationType="fade"
         >
           <View className="flex-1 bg-black/80 justify-center items-center px-5">
-            <View className="bg-slate-900 w-full rounded-3xl p-5 border border-slate-700 items-center">
-              <View className="w-14 h-14 rounded-full bg-amber-500/20 border border-amber-500/40 items-center justify-center mb-3">
+            <View className="bg-[#131C31] w-full rounded-3xl p-6 border border-slate-700 items-center">
+              <View className="w-16 h-16 rounded-2xl bg-amber-500/20 border border-amber-500/40 items-center justify-center mb-4">
                 <MaterialCommunityIcons
                   name="alert-octagon"
-                  size={28}
+                  size={32}
                   color="#FBBF24"
                 />
               </View>
@@ -1213,7 +1626,7 @@ export default function StrictFocusScreen() {
               </Text>
               <Text
                 allowFontScaling={false}
-                className="text-slate-400 text-xs text-center leading-5 mb-5"
+                className="text-slate-300 text-xs text-center leading-5 mb-5"
               >
                 {emergencyPasses > 0
                   ? `এখন লক ভাঙলে আপনার জমানো ${emergencyPasses}টি পাস থেকে ১টি পাস কেটে ক্লাউডে আপডেট করা হবে (বাকি থাকবে ${emergencyPasses - 1}টি) এবং ৩ দিনের স্ট্রিক ০ হয়ে যাবে!`
@@ -1224,7 +1637,7 @@ export default function StrictFocusScreen() {
                 <Pressable
                   onPress={() => setEmergencyModalVisible(false)}
                   disabled={spendingPass}
-                  className="flex-1 bg-slate-800 py-3.5 rounded-2xl items-center"
+                  className="flex-1 bg-slate-800 py-3.5 rounded-2xl items-center border border-slate-700"
                 >
                   <Text
                     allowFontScaling={false}
@@ -1255,12 +1668,65 @@ export default function StrictFocusScreen() {
             </View>
           </View>
         </Modal>
+
+        {/* Universal Modern Custom Notice Modal */}
+        <Modal
+          visible={uiModal.visible}
+          transparent
+          animationType="fade"
+          onRequestClose={() =>
+            setUiModal((prev) => ({ ...prev, visible: false }))
+          }
+        >
+          <View className="flex-1 bg-black/80 justify-center items-center px-6">
+            <View className="bg-[#131C31] w-full rounded-3xl p-6 border border-slate-700 items-center">
+              <View
+                style={{
+                  backgroundColor: `${uiModal.color}20`,
+                  borderColor: `${uiModal.color}50`,
+                }}
+                className="w-16 h-16 rounded-2xl items-center justify-center mb-4 border"
+              >
+                <MaterialCommunityIcons
+                  name={uiModal.icon}
+                  size={34}
+                  color={uiModal.color}
+                />
+              </View>
+              <Text
+                allowFontScaling={false}
+                className="text-white font-black text-lg text-center mb-2"
+              >
+                {uiModal.title}
+              </Text>
+              <Text
+                allowFontScaling={false}
+                className="text-slate-300 text-xs text-center leading-5 mb-5"
+              >
+                {uiModal.message}
+              </Text>
+              <Pressable
+                onPress={() =>
+                  setUiModal((prev) => ({ ...prev, visible: false }))
+                }
+                className="w-full bg-indigo-600 py-3.5 rounded-2xl items-center"
+              >
+                <Text
+                  allowFontScaling={false}
+                  className="text-white font-black text-xs uppercase tracking-wider"
+                >
+                  ঠিক আছে
+                </Text>
+              </Pressable>
+            </View>
+          </View>
+        </Modal>
       </SafeAreaView>
     );
   }
 
   // =========================================================================
-  // 2. CLEAN UNLOCK SCREEN (Auto-Hides Granted Permissions + Max 6h/10h Limits)
+  // 2. CLEAN UNLOCK SCREEN (Auto-Hides Granted Permissions + Max 6h/15h Limits)
   // =========================================================================
   const allPermsReady =
     permState.accessibility && permState.overlay && permState.deviceAdmin;
@@ -1272,7 +1738,7 @@ export default function StrictFocusScreen() {
 
   return (
     <View className="flex-1 bg-[#0B1120]">
-      <StatusBar style="light" />
+      <StatusBar style="light" backgroundColor="#070B14" />
 
       <ScrollView
         className="flex-1"
@@ -1459,7 +1925,7 @@ export default function StrictFocusScreen() {
 
         {/* MIDDLE-TO-BOTTOM: CLEAN CURVED SHEET */}
         <View className="bg-[#0B1120] rounded-t-[32px] -mt-6 px-5 pt-6">
-          {/* AUTO-HIDE SYSTEM PERMISSIONS BANNER: Only shown when at least 1 permission is missing! */}
+          {/* AUTO-HIDE SYSTEM PERMISSIONS BANNER */}
           {!allPermsReady && (
             <Pressable
               onPress={() => setSettingsModalVisible(true)}
@@ -1594,7 +2060,7 @@ export default function StrictFocusScreen() {
               </View>
             )}
 
-            {/* Quick Summary Pills for YT, Chrome & PDF */}
+            {/* Quick Summary Pills for YT (30m + 3.5h), Chrome & PDF */}
             <View className="flex-row gap-2 pt-2 border-t border-slate-800">
               <Pressable
                 onPress={() => setSettingsModalVisible(true)}
@@ -1604,9 +2070,10 @@ export default function StrictFocusScreen() {
                   <Ionicons name="logo-youtube" size={14} color="#EF4444" />
                   <Text
                     allowFontScaling={false}
+                    numberOfLines={1}
                     className="text-slate-300 font-bold text-[11px] ml-1.5"
                   >
-                    YT: {ytLimitMinutes}m
+                    YT: {ytLimitMinutes}m + {studyHoursText}h
                   </Text>
                 </View>
                 <Ionicons name="chevron-forward" size={12} color="#64748B" />
@@ -1651,7 +2118,7 @@ export default function StrictFocusScreen() {
             </View>
           </View>
 
-          {/* CARD 3: Daily Schedule Lock Card (KEPT EXACTLY AS USER LIKED!) */}
+          {/* CARD 3: Daily Schedule Lock Card (KEPT EXACTLY AS USER LIKED, updated label to Max 15h!) */}
           <View className="bg-[#131C31] p-4 rounded-3xl border border-slate-800">
             <View className="flex-row items-center justify-between mb-3">
               <View className="flex-row items-center flex-1 pr-2">
@@ -1673,7 +2140,7 @@ export default function StrictFocusScreen() {
                     allowFontScaling={false}
                     className="text-slate-400 text-[11px]"
                   >
-                    সর্বোচ্চ ১০ ঘণ্টা সীমা • 50m Lock + 10m Break সাপোর্ট
+                    সর্বোচ্চ ১৫ ঘণ্টা সীমা • 50m Lock + 10m Break সাপোর্ট
                   </Text>
                 </View>
               </View>
@@ -1740,7 +2207,7 @@ export default function StrictFocusScreen() {
                       allowFontScaling={false}
                       className="text-slate-400 text-[10px] mt-0.5"
                     >
-                      Schedule {i + 1} ({durHours}h / Max 10h) •{" "}
+                      Schedule {i + 1} ({durHours}h / Max 15h) •{" "}
                       {sched.activeDays.length}d/wk
                     </Text>
                   </Pressable>
@@ -1803,7 +2270,7 @@ export default function StrictFocusScreen() {
                     allowFontScaling={false}
                     className="text-slate-300 font-bold text-xs ml-1.5"
                   >
-                    বর্তমান জমানো পাস
+                    বর্তমান জমানো পাস (Account-Wise)
                   </Text>
                 </View>
                 <Text
@@ -1865,9 +2332,8 @@ export default function StrictFocusScreen() {
             >
               • প্রতিদিন কমপক্ষে ৩০ মিনিটের লক সফলভাবে পূর্ণ করলে ১ স্ট্রিক যোগ
               হয় (দিনে সর্বোচ্চ ১টি)।{"\n"}• টানা ৩ দিন পূর্ণ করলে পুরস্কার
-              হিসেবে +1 Emergency Pass পাবেন (সর্বোচ্চ ৫টি)। মাঝখানে ১ দিন গ্যাপ
-              গেলে শুধু ৩-দিনের স্ট্রিক কাউন্টার 1/3 থেকে শুরু হবে, জমানো পাস
-              কখনোই কমবে না।
+              হিসেবে +1 Emergency Pass পাবেন (সর্বোচ্চ ৫টি)।{"\n"}• প্রতিটি
+              Gmail অ্যাকাউন্টের পাস ও স্ট্রিক সম্পূর্ণ আলাদাভাবে ক্লাউডে সেভ থাকে।
             </Text>
 
             <Pressable
@@ -1886,7 +2352,7 @@ export default function StrictFocusScreen() {
       </Modal>
 
       {/* ===================================================================== */}
-      {/* MODAL 2: TOP-RIGHT SETTINGS MODAL (Auto-hides granted permissions)    */}
+      {/* MODAL 2: TOP-RIGHT SETTINGS MODAL (Dual YT Quota + Study Channels/Videos + Chrome) */}
       {/* ===================================================================== */}
       <Modal
         visible={settingsModalVisible}
@@ -1929,7 +2395,7 @@ export default function StrictFocusScreen() {
               showsVerticalScrollIndicator={false}
               keyboardShouldPersistTaps="handled"
             >
-              {/* 1. System Permissions: Each row auto-hides once granted; entire block hides when all 3 are granted! */}
+              {/* 1. System Permissions (Auto-hides once all 3 are granted!) */}
               {!allPermsReady && (
                 <>
                   <Text
@@ -2027,19 +2493,19 @@ export default function StrictFocusScreen() {
                 </>
               )}
 
-              {/* 2. YouTube Long Video Daily Quota */}
+              {/* 🌟 2. General YouTube Daily Limit (15m / 30m / 45m Max) */}
               <Text
                 allowFontScaling={false}
                 className="text-slate-400 font-bold text-xs uppercase mb-2"
               >
-                YouTube লং ভিডিও ডেইলি লিমিট (ক্লাউড সিঙ্কড)
+                ১. সাধারণ YouTube ডেইলি লিমিট (General YT • Max 45m)
               </Text>
               <View className="bg-slate-800 p-3.5 rounded-2xl border border-slate-700 mb-4">
                 <View className="flex-row gap-2">
                   {[
-                    { label: "60m (1h)", val: 60 },
-                    { label: "90m (1.5h)", val: 90 },
-                    { label: "120m (2h)", val: 120 },
+                    { label: "15m", val: 15 },
+                    { label: "30m (Default)", val: 30 },
+                    { label: "45m (Max)", val: 45 },
                   ].map((opt) => (
                     <Pressable
                       key={opt.val}
@@ -2066,12 +2532,227 @@ export default function StrictFocusScreen() {
                 </View>
               </View>
 
-              {/* 3. Chrome Allowed Websites (Max 5 Sites, No YouTube, Keyboard-Safe!) */}
+              {/* 🌟 3. YouTube Study Channel & Video System (1.5h / 2.5h / 3.5h Max) */}
+              <View className="flex-row items-center justify-between mb-2">
+                <Text
+                  allowFontScaling={false}
+                  className="text-emerald-400 font-bold text-xs uppercase"
+                >
+                  ২. YouTube Study Mode (ক্লাস ও লেকচার লিমিট)
+                </Text>
+                <Text
+                  allowFontScaling={false}
+                  className="text-slate-400 font-bold text-[10px]"
+                >
+                  Max 3.5h/day
+                </Text>
+              </View>
+
+              <View className="bg-slate-800 p-3.5 rounded-2xl border border-emerald-500/30 mb-4">
+                {/* Study Time Limit Pills: 1.5h / 2.5h / 3.5h */}
+                <View className="flex-row gap-2 mb-3">
+                  {[
+                    { label: "1.5h (90m)", val: 90 },
+                    { label: "2.5h (150m)", val: 150 },
+                    { label: "3.5h (210m)", val: 210 },
+                  ].map((opt) => (
+                    <Pressable
+                      key={opt.val}
+                      onPress={() => void updateStudyYtQuota(opt.val)}
+                      className={`flex-1 py-2 px-1 rounded-xl items-center justify-center border ${
+                        ytStudyLimitMinutes === opt.val
+                          ? "bg-emerald-500/20 border-emerald-400"
+                          : "bg-slate-900 border-slate-700"
+                      }`}
+                    >
+                      <Text
+                        allowFontScaling={false}
+                        numberOfLines={1}
+                        className={`text-xs font-bold ${
+                          ytStudyLimitMinutes === opt.val
+                            ? "text-emerald-300"
+                            : "text-slate-400"
+                        }`}
+                      >
+                        {opt.label}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+
+                {/* 2-Tab Switcher: Study Channels (স্থায়ী) vs Today's Videos (আজকের) */}
+                <View className="flex-row bg-slate-900 p-1 rounded-xl border border-slate-700 mb-3">
+                  <Pressable
+                    onPress={() => setStudyTab("channels")}
+                    className={`flex-1 py-2 px-2 rounded-lg flex-row items-center justify-center ${
+                      studyTab === "channels" ? "bg-indigo-600" : ""
+                    }`}
+                  >
+                    <MaterialCommunityIcons
+                      name="school-outline"
+                      size={14}
+                      color={studyTab === "channels" ? "#FFFFFF" : "#94A3B8"}
+                    />
+                    <Text
+                      allowFontScaling={false}
+                      numberOfLines={1}
+                      className={`font-bold text-[11px] ml-1.5 ${
+                        studyTab === "channels"
+                          ? "text-white"
+                          : "text-slate-400"
+                      }`}
+                    >
+                      Study Channels ({studyChannels.length}/5)
+                    </Text>
+                  </Pressable>
+
+                  <Pressable
+                    onPress={() => setStudyTab("videos")}
+                    className={`flex-1 py-2 px-2 rounded-lg flex-row items-center justify-center ${
+                      studyTab === "videos" ? "bg-emerald-600" : ""
+                    }`}
+                  >
+                    <Feather
+                      name="play-circle"
+                      size={13}
+                      color={studyTab === "videos" ? "#FFFFFF" : "#94A3B8"}
+                    />
+                    <Text
+                      allowFontScaling={false}
+                      numberOfLines={1}
+                      className={`font-bold text-[11px] ml-1.5 ${
+                        studyTab === "videos" ? "text-white" : "text-slate-400"
+                      }`}
+                    >
+                      Today&apos;s Videos ({studyVideos.length}/5)
+                    </Text>
+                  </Pressable>
+                </View>
+
+                {/* Input Row */}
+                <View className="flex-row gap-2 mb-2.5">
+                  <TextInput
+                    placeholder={
+                      studyTab === "channels"
+                        ? "চ্যানেলের নাম (যেমন: Phitron, Apna College)..."
+                        : "ক্লাস ভিডিওর Link বা Title পেস্ট করুন..."
+                    }
+                    placeholderTextColor="#64748B"
+                    value={newStudyInput}
+                    onChangeText={setNewStudyInput}
+                    returnKeyType="done"
+                    onSubmitEditing={() => void addStudyItem()}
+                    className="flex-1 bg-slate-900 text-white px-3.5 py-2.5 rounded-xl border border-slate-700 text-xs"
+                  />
+                  <Pressable
+                    onPress={() => void addStudyItem()}
+                    className={`px-4 rounded-xl items-center justify-center ${
+                      studyTab === "channels"
+                        ? "bg-indigo-600"
+                        : "bg-emerald-600"
+                    }`}
+                  >
+                    <Text
+                      allowFontScaling={false}
+                      className="text-white font-bold text-xs"
+                    >
+                      + Add
+                    </Text>
+                  </Pressable>
+                </View>
+
+                {/* List of Study Channels or Today's Videos */}
+                {studyTab === "channels" ? (
+                  studyChannels.length === 0 ? (
+                    <Text
+                      allowFontScaling={false}
+                      className="text-slate-400 text-[11px] text-center py-2"
+                    >
+                      কোনো চ্যানেল যোগ করা হয়নি (চ্যানেল নাম স্থায়ীভাবে সেভ থাকবে)
+                    </Text>
+                  ) : (
+                    studyChannels.map((ch) => (
+                      <View
+                        key={ch}
+                        className="flex-row items-center justify-between bg-slate-900 px-3.5 py-2.5 rounded-xl mb-1.5 border border-slate-700/70"
+                      >
+                        <View className="flex-row items-center flex-1 pr-2">
+                          <MaterialCommunityIcons
+                            name="school"
+                            size={15}
+                            color="#818CF8"
+                          />
+                          <Text
+                            allowFontScaling={false}
+                            numberOfLines={1}
+                            className="text-white font-bold text-xs ml-2 flex-1"
+                          >
+                            {ch}
+                          </Text>
+                          <View className="bg-indigo-500/15 px-2 py-0.5 rounded-md mr-2">
+                            <Text
+                              allowFontScaling={false}
+                              className="text-indigo-300 text-[9px] font-bold"
+                            >
+                              স্থায়ী
+                            </Text>
+                          </View>
+                        </View>
+                        <Pressable onPress={() => void removeStudyChannel(ch)}>
+                          <Feather name="trash-2" size={14} color="#F43F5E" />
+                        </Pressable>
+                      </View>
+                    ))
+                  )
+                ) : studyVideos.length === 0 ? (
+                  <Text
+                    allowFontScaling={false}
+                    className="text-slate-400 text-[11px] text-center py-2"
+                  >
+                    আজকের কোনো ক্লাস ভিডিও নেই (রাত ১২টার পর অটো ক্লিয়ার হয়)
+                  </Text>
+                ) : (
+                  studyVideos.map((vid) => (
+                    <View
+                      key={vid.id}
+                      className="flex-row items-center justify-between bg-slate-900 px-3.5 py-2.5 rounded-xl mb-1.5 border border-slate-700/70"
+                    >
+                      <View className="flex-row items-center flex-1 pr-2">
+                        <Feather
+                          name="play-circle"
+                          size={14}
+                          color="#34D399"
+                        />
+                        <Text
+                          allowFontScaling={false}
+                          numberOfLines={1}
+                          className="text-white font-bold text-xs ml-2 flex-1"
+                        >
+                          {vid.title}
+                        </Text>
+                        <View className="bg-emerald-500/15 px-2 py-0.5 rounded-md mr-2">
+                          <Text
+                            allowFontScaling={false}
+                            className="text-emerald-300 text-[9px] font-bold"
+                          >
+                            আজ রাত ১২টা
+                          </Text>
+                        </View>
+                      </View>
+                      <Pressable onPress={() => void removeStudyVideo(vid.id)}>
+                        <Feather name="trash-2" size={14} color="#F43F5E" />
+                      </Pressable>
+                    </View>
+                  ))
+                )}
+              </View>
+
+              {/* 4. Chrome Allowed Websites (Max 5 Sites, No YouTube) */}
               <Text
                 allowFontScaling={false}
                 className="text-slate-400 font-bold text-xs uppercase mb-2"
               >
-                Chrome অনুমোদিত ওয়েবসাইট ({allowedDomains.length}/
+                ৩. Chrome অনুমোদিত ওয়েবসাইট ({allowedDomains.length}/
                 {MAX_ALLOWED_DOMAINS} Max • YouTube নিষিদ্ধ)
               </Text>
               <View className="bg-slate-800 p-3.5 rounded-2xl border border-slate-700 mb-4">
@@ -2130,7 +2811,7 @@ export default function StrictFocusScreen() {
       </Modal>
 
       {/* ===================================================================== */}
-      {/* MODAL 3: DAILY SCHEDULE LOCK MANAGER MODAL (Fixed + নতুন button!)     */}
+      {/* MODAL 3: DAILY SCHEDULE LOCK MANAGER MODAL (Max 15h + 10h/12h Warning) */}
       {/* ===================================================================== */}
       <Modal
         visible={scheduleModalVisible}
@@ -2143,7 +2824,7 @@ export default function StrictFocusScreen() {
             style={{ paddingBottom: Math.max(20, insets.bottom + 12) }}
             className="bg-slate-900 w-full rounded-t-[32px] px-5 pt-5 border-t border-slate-700 max-h-[88%]"
           >
-            {/* 🌟 Balanced Header: Left Title flex-1 + Well-Spaced "+ নতুন" & Close Button */}
+            {/* Balanced Header */}
             <View className="flex-row items-center justify-between mb-3">
               <View className="flex-1 pr-3">
                 <Text
@@ -2158,7 +2839,7 @@ export default function StrictFocusScreen() {
                   numberOfLines={1}
                   className="text-slate-400 text-[11px] mt-0.5"
                 >
-                  প্রতিটি শিডিউল সর্বোচ্চ ১০ ঘণ্টা পর্যন্ত সেট করা যাবে
+                  সর্বোচ্চ ১৫ ঘণ্টা সীমা (১০/১২ ঘণ্টার ওপরে সতর্কতা দেখাবে)
                 </Text>
               </View>
 
@@ -2234,12 +2915,19 @@ export default function StrictFocusScreen() {
                   schedule.startTime,
                   schedule.endTime,
                 );
-                const isOverLimit = durMins > MAX_SCHEDULE_MINUTES;
+                const isOverMax = durMins > MAX_SCHEDULE_MINUTES;
+                const isLongWarn =
+                  durMins > WARN_SCHEDULE_MINUTES &&
+                  durMins <= MAX_SCHEDULE_MINUTES;
                 return (
                   <View
                     key={schedule.id}
                     className={`bg-slate-800 p-4 rounded-3xl border mb-3 ${
-                      isOverLimit ? "border-rose-500" : "border-slate-700"
+                      isOverMax
+                        ? "border-rose-500"
+                        : isLongWarn
+                          ? "border-amber-500/60"
+                          : "border-slate-700"
                     }`}
                   >
                     <View className="flex-row items-center justify-between mb-3">
@@ -2253,10 +2941,15 @@ export default function StrictFocusScreen() {
                         <Text
                           allowFontScaling={false}
                           className={`text-[10px] font-bold ${
-                            isOverLimit ? "text-rose-400" : "text-emerald-400"
+                            isOverMax
+                              ? "text-rose-400"
+                              : isLongWarn
+                                ? "text-amber-400"
+                                : "text-emerald-400"
                           }`}
                         >
-                          সময়কাল: {(durMins / 60).toFixed(1)} ঘণ্টা (Max 10h)
+                          সময়কাল: {(durMins / 60).toFixed(1)} ঘণ্টা{" "}
+                          {isLongWarn ? "(১০+ ঘণ্টা দীর্ঘ লক)" : "(Max 15h)"}
                         </Text>
                       </View>
                       <Switch
@@ -2399,7 +3092,7 @@ export default function StrictFocusScreen() {
       </Modal>
 
       {/* ===================================================================== */}
-      {/* 🌟 NEW MODAL 5: MODERN CUSTOM SCHEDULE SAVED POPUP MODAL              */}
+      {/* MODAL 5: MODERN CUSTOM SCHEDULE SAVED POPUP MODAL                     */}
       {/* ===================================================================== */}
       <Modal
         visible={scheduleSavedModal.visible}
@@ -2443,7 +3136,7 @@ export default function StrictFocusScreen() {
               className="text-slate-300 text-xs text-center leading-5 mb-4"
             >
               {scheduleSavedModal.hasEnabled
-                ? `আপনার ${scheduleSavedModal.activeCount}টি শিডিউল সচল করা হয়েছে। নির্ধারিত সময়ে প্রতিদিন অটোমেটিক কড়া লক (সর্বোচ্চ ১০ ঘণ্টা) চালু হয়ে যাবে এবং ক্লাউডে ব্যাকআপ রাখা হয়েছে।`
+                ? `আপনার ${scheduleSavedModal.activeCount}টি শিডিউল সচল করা হয়েছে। নির্ধারিত সময়ে প্রতিদিন অটোমেটিক কড়া লক (সর্বোচ্চ ১৫ ঘণ্টা) চালু হয়ে যাবে এবং ক্লাউডে ব্যাকআপ রাখা হয়েছে।`
                 : "আপনার শিডিউল ক্লাউডে সেভ হয়েছে (বর্তমানে সুইচ অফ করা আছে)।"}
             </Text>
 
@@ -2610,6 +3303,95 @@ export default function StrictFocusScreen() {
         </KeyboardAvoidingView>
       </Modal>
 
+      {/* ===================================================================== */}
+      {/* UNIVERSAL MODERN CUSTOM ALERT / WARNING MODAL (Replaces Alert.alert!) */}
+      {/* ===================================================================== */}
+      <Modal
+        visible={uiModal.visible}
+        transparent
+        animationType="fade"
+        onRequestClose={() =>
+          setUiModal((prev) => ({ ...prev, visible: false }))
+        }
+      >
+        <View className="flex-1 bg-black/80 justify-center items-center px-6">
+          <View className="bg-[#131C31] w-full rounded-3xl p-6 border border-slate-700 items-center shadow-2xl">
+            <View
+              style={{
+                backgroundColor: `${uiModal.color}20`,
+                borderColor: `${uiModal.color}50`,
+              }}
+              className="w-16 h-16 rounded-2xl items-center justify-center mb-4 border"
+            >
+              <MaterialCommunityIcons
+                name={uiModal.icon}
+                size={34}
+                color={uiModal.color}
+              />
+            </View>
+            <Text
+              allowFontScaling={false}
+              className="text-white font-black text-lg text-center mb-2"
+            >
+              {uiModal.title}
+            </Text>
+            <Text
+              allowFontScaling={false}
+              className="text-slate-300 text-xs text-center leading-5 mb-5"
+            >
+              {uiModal.message}
+            </Text>
+
+            {uiModal.onConfirm ? (
+              <View className="flex-row gap-3 w-full">
+                <Pressable
+                  onPress={() =>
+                    setUiModal((prev) => ({ ...prev, visible: false }))
+                  }
+                  className="flex-1 bg-slate-800 py-3.5 rounded-2xl items-center border border-slate-700"
+                >
+                  <Text
+                    allowFontScaling={false}
+                    className="text-slate-200 font-bold text-xs"
+                  >
+                    {uiModal.cancelText || "বাতিল"}
+                  </Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => {
+                    const fn = uiModal.onConfirm;
+                    setUiModal((prev) => ({ ...prev, visible: false }));
+                    if (fn) fn();
+                  }}
+                  className="flex-1 bg-indigo-600 py-3.5 rounded-2xl items-center active:bg-indigo-700"
+                >
+                  <Text
+                    allowFontScaling={false}
+                    className="text-white font-black text-xs"
+                  >
+                    {uiModal.confirmText || "নিশ্চিত করুন"}
+                  </Text>
+                </Pressable>
+              </View>
+            ) : (
+              <Pressable
+                onPress={() =>
+                  setUiModal((prev) => ({ ...prev, visible: false }))
+                }
+                className="w-full bg-indigo-600 py-3.5 rounded-2xl items-center active:bg-indigo-700"
+              >
+                <Text
+                  allowFontScaling={false}
+                  className="text-white font-black text-xs uppercase tracking-wider"
+                >
+                  ঠিক আছে
+                </Text>
+              </Pressable>
+            )}
+          </View>
+        </View>
+      </Modal>
+
       {showPicker && editingSchedule && (
         <DateTimePicker
           value={
@@ -2633,12 +3415,22 @@ export default function StrictFocusScreen() {
                   editingSchedule.type === "end" ? date : target.endTime;
                 const durMins = getScheduleDurationMinutes(nextStart, nextEnd);
                 if (durMins > MAX_SCHEDULE_MINUTES) {
-                  Alert.alert(
-                    "সর্বোচ্চ ১০ ঘণ্টার সীমা (Schedule Limit)",
-                    `আপনি ${(durMins / 60).toFixed(1)} ঘণ্টার ব্যবধান দিয়েছেন। নিরাপত্তার জন্য Schedule Lock একটানা সর্বোচ্চ ১০ ঘণ্টার (৬০০ মিনিট) বেশি সেট করা যাবে না।`,
+                  showModernNotice(
+                    "সর্বোচ্চ ১৫ ঘণ্টার সীমা (Max 15h)",
+                    `আপনি ${(durMins / 60).toFixed(1)} ঘণ্টার ব্যবধান দিয়েছেন। নিরাপত্তার জন্য Schedule Lock একটানা সর্বোচ্চ ১৫ ঘণ্টার (৯০০ মিনিট) বেশি সেট করা যাবে না।`,
+                    "clock-alert-outline",
+                    "#F43F5E",
                   );
                   setEditingSchedule(null);
                   return;
+                }
+                if (durMins > WARN_SCHEDULE_MINUTES) {
+                  showModernNotice(
+                    "দীর্ঘ শিডিউল লকের সতর্কতা (১০+ ঘণ্টা)",
+                    `আপনি ${(durMins / 60).toFixed(1)} ঘণ্টার একটি দীর্ঘ শিডিউল সেট করেছেন (১০/১২ ঘণ্টার বেশি)। এই পুরো সময় ফোন কড়া লকে থাকবে।`,
+                    "alert-decagram-outline",
+                    "#FBBF24",
+                  );
                 }
               }
 

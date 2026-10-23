@@ -6,8 +6,8 @@ import { StatusBar } from "expo-status-bar";
 import React, { useCallback, useMemo, useState } from "react";
 import {
   ActivityIndicator,
-  Alert,
   Image,
+  Modal,
   NativeModules,
   Platform,
   Pressable,
@@ -20,6 +20,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
   CACHED_USER_PROFILE_KEY,
   CachedUserProfile,
+  clearAllLocalAccountData,
   supabase,
   syncLocalDataToCloudIfOnline,
 } from "../../lib/supabase";
@@ -43,6 +44,9 @@ export default function Profile() {
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
 
+  // Modern Custom Day Details Modal (Replaces Alert.alert when tapping a 60-day heatmap cell!)
+  const [selectedCell, setSelectedCell] = useState<DayCell | null>(null);
+
   const loadUserProfileOfflineFirst = useCallback(async () => {
     try {
       const cachedRaw = await AsyncStorage.getItem(CACHED_USER_PROFILE_KEY);
@@ -51,7 +55,6 @@ export default function Profile() {
         setLoading(false);
       }
 
-      // Sync with cloud first so reinstalled app restores totalCompleted, streak & history!
       await syncLocalDataToCloudIfOnline();
 
       let passes = 0;
@@ -136,7 +139,7 @@ export default function Profile() {
 
   // Build 60-Day (9 Weeks x 7 Days = 63 cells ending Today) GitHub-style Contribution Grid
   const heatmapData = useMemo(() => {
-    const totalDays = 63; // 9 columns x 7 rows
+    const totalDays = 63;
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
@@ -182,7 +185,6 @@ export default function Profile() {
       });
     }
 
-    // Group into 9 week columns of 7 days each
     const weeks: DayCell[][] = [];
     for (let w = 0; w < 9; w++) {
       weeks.push(cells.slice(w * 7, w * 7 + 7));
@@ -210,9 +212,11 @@ export default function Profile() {
     setSyncing(false);
   };
 
+  // 🌟 Account-Wise Isolation on Sign Out: Syncs current account first, then wipes local & native state clean!
   const handleLogout = async () => {
     try {
-      await AsyncStorage.removeItem("@is_logged_in");
+      await syncLocalDataToCloudIfOnline();
+      await clearAllLocalAccountData();
       try {
         await supabase.auth.signOut();
       } catch {}
@@ -240,7 +244,7 @@ export default function Profile() {
 
   return (
     <View className="flex-1 bg-[#0B1120]">
-      {isFocused && <StatusBar style="light" />}
+      {isFocused && <StatusBar style="light" backgroundColor="#131C31" />}
 
       <ScrollView
         className="flex-1"
@@ -408,7 +412,6 @@ export default function Profile() {
           {/* 9 Weeks x 7 Days Matrix */}
           <View className="bg-[#0B1120] p-3 rounded-2xl border border-slate-800/80">
             <View className="flex-row justify-between items-center">
-              {/* Day labels column */}
               <View
                 className="justify-between mr-1.5 py-0.5"
                 style={{ height: 118 }}
@@ -424,21 +427,13 @@ export default function Profile() {
                 ))}
               </View>
 
-              {/* 9 Week Columns */}
               <View className="flex-1 flex-row justify-between">
                 {heatmapData.weeks.map((week, wIdx) => (
                   <View key={wIdx} className="gap-y-1.5">
                     {week.map((cell) => (
                       <Pressable
                         key={cell.dateStr}
-                        onPress={() =>
-                          Alert.alert(
-                            `${cell.label} (${cell.dateStr})`,
-                            cell.minutes > 0
-                              ? `এই দিনে আপনি মোট ${cell.minutes} মিনিট কড়া ফোকাস লক পূর্ণ করেছেন।`
-                              : "এই দিনে কোনো ৩০+ মিনিটের ফোকাস লক রেকর্ড করা হয়নি।",
-                          )
-                        }
+                        onPress={() => setSelectedCell(cell)}
                         className={`w-6 h-3.5 rounded-[4px] border ${getGitHubGreenClass(
                           cell.minutes,
                         )} ${cell.isToday ? "border-white" : ""}`}
@@ -449,7 +444,6 @@ export default function Profile() {
               </View>
             </View>
 
-            {/* GitHub Legend Row */}
             <View className="flex-row items-center justify-between mt-3 pt-2 border-t border-slate-800/80">
               <Text
                 allowFontScaling={false}
@@ -495,13 +489,13 @@ export default function Profile() {
                 allowFontScaling={false}
                 className="text-sm font-bold text-white"
               >
-                Cloud Profile & Streak Backup
+                Account-Wise Cloud Backup
               </Text>
               <Text
                 allowFontScaling={false}
                 className="text-[11px] text-slate-400 mt-0.5"
               >
-                অফলাইন + অনলাইন অটো সিঙ্ক সচল আছে
+                এই Gmail অ্যাকাউন্টের নিজস্ব ডাটা সিঙ্ক সচল আছে
               </Text>
             </View>
           </View>
@@ -526,8 +520,8 @@ export default function Profile() {
             icon="shield-lock"
             color="#F43F5E"
             bg="bg-rose-500/15"
-            title="Strict Focus Lock & PDF Reader"
-            subtitle="25m/5m Session, 50m/10m Schedule & Study PDF"
+            title="Strict Focus Lock & Study YT"
+            subtitle="25m/5m Session, 50m/10m Schedule & 3.5h Class YT"
             onPress={() => router.push("/features/StrictFocusScreen")}
           />
           <MenuItem
@@ -571,6 +565,61 @@ export default function Profile() {
           </Text>
         </Pressable>
       </ScrollView>
+
+      {/* MODERN 60-DAY HEATMAP CELL DETAILS MODAL */}
+      <Modal
+        visible={!!selectedCell}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setSelectedCell(null)}
+      >
+        <View className="flex-1 bg-black/80 justify-center items-center px-6">
+          <View className="bg-[#131C31] w-full rounded-3xl p-6 border border-slate-700 items-center">
+            <View
+              className={`w-16 h-16 rounded-2xl items-center justify-center mb-4 border ${
+                (selectedCell?.minutes || 0) > 0
+                  ? "bg-emerald-500/20 border-emerald-400/50"
+                  : "bg-slate-800 border-slate-700"
+              }`}
+            >
+              <MaterialCommunityIcons
+                name={
+                  (selectedCell?.minutes || 0) > 0
+                    ? "calendar-check"
+                    : "calendar-blank-outline"
+                }
+                size={32}
+                color={(selectedCell?.minutes || 0) > 0 ? "#34D399" : "#94A3B8"}
+              />
+            </View>
+            <Text
+              allowFontScaling={false}
+              className="text-white font-black text-lg text-center mb-1.5"
+            >
+              {selectedCell?.label} ({selectedCell?.dateStr})
+            </Text>
+            <Text
+              allowFontScaling={false}
+              className="text-slate-300 text-xs text-center leading-5 mb-5"
+            >
+              {(selectedCell?.minutes || 0) > 0
+                ? `এই দিনে আপনি মোট ${selectedCell?.minutes} মিনিট কড়া ফোকাস লক সফলভাবে পূর্ণ করেছেন।`
+                : "এই দিনে কোনো ৩০+ মিনিটের ফোকাস লক রেকর্ড করা হয়নি।"}
+            </Text>
+            <Pressable
+              onPress={() => setSelectedCell(null)}
+              className="w-full bg-indigo-600 py-3.5 rounded-2xl items-center active:bg-indigo-700"
+            >
+              <Text
+                allowFontScaling={false}
+                className="text-white font-black text-xs uppercase tracking-wider"
+              >
+                ঠিক আছে
+              </Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }

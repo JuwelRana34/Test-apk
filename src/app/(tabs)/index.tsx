@@ -5,9 +5,9 @@ import { useFocusEffect, useIsFocused, useRouter } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import React, { useCallback, useMemo, useState } from "react";
 import {
-  Alert,
   Image,
   Linking,
+  Modal,
   NativeModules,
   Platform,
   Pressable,
@@ -54,11 +54,28 @@ export default function HomePage() {
   const [totalContacts, setTotalContacts] = useState(0);
   const [unreadNotices, setUnreadNotices] = useState(0);
 
+  // Modern Custom Modal State (Replaces default Alert.alert)
+  const [uiModal, setUiModal] = useState<{
+    visible: boolean;
+    title: string;
+    message: string;
+    icon: keyof typeof MaterialCommunityIcons.glyphMap;
+    color: string;
+  }>({
+    visible: false,
+    title: "",
+    message: "",
+    icon: "information-outline",
+    color: "#38BDF8",
+  });
+
   useFocusEffect(
     useCallback(() => {
       const loadHomeDashboard = async () => {
         try {
-          // Ensure cloud backup & stats are synced
+          if (Platform.OS === "android" && FocusLock?.applyDarkNavigationBar) {
+            void FocusLock.applyDarkNavigationBar();
+          }
           void syncLocalDataToCloudIfOnline();
 
           const [cachedProfileRaw, contactsRaw, noticesList] =
@@ -132,10 +149,13 @@ export default function HomePage() {
       const mime = (asset.mimeType || "").toLowerCase();
 
       if (!fileName.endsWith(".pdf") && mime !== "application/pdf") {
-        Alert.alert(
-          "শুধুমাত্র PDF ফাইল অনুমোদিত",
-          "পড়াশোনার জন্য শুধুমাত্র .pdf ফাইল সিলেক্ট করুন।",
-        );
+        setUiModal({
+          visible: true,
+          title: "শুধুমাত্র PDF ফাইল অনুমোদিত",
+          message: "পড়াশোনার জন্য শুধুমাত্র .pdf ফাইল সিলেক্ট করুন।",
+          icon: "file-alert-outline",
+          color: "#F43F5E",
+        });
         return;
       }
 
@@ -145,10 +165,14 @@ export default function HomePage() {
         await Linking.openURL(asset.uri);
       }
     } catch {
-      Alert.alert(
-        "PDF ওপেন করা যায়নি",
-        "ফোনে News Plus বা Google Drive PDF Viewer ইনস্টল করা আছে কি না চেক করুন।",
-      );
+      setUiModal({
+        visible: true,
+        title: "PDF ওপেন করা যায়নি",
+        message:
+          "ফোনে News Plus বা Google Drive PDF Viewer ইনস্টল করা আছে কি না চেক করুন।",
+        icon: "file-pdf-box",
+        color: "#F43F5E",
+      });
     }
   };
 
@@ -184,7 +208,7 @@ export default function HomePage() {
 
   return (
     <View className="flex-1 bg-[#0B1120]">
-      {isFocused && <StatusBar style="light" />}
+      {isFocused && <StatusBar style="light" backgroundColor="#131C31" />}
 
       <ScrollView
         showsVerticalScrollIndicator={false}
@@ -264,7 +288,7 @@ export default function HomePage() {
             </View>
           </View>
 
-          {/* 🌟 Overflow-Proof Pass, Streak & Focus Button Card (Never overlaps!) */}
+          {/* Overflow-Proof Pass, Streak & Focus Button Card */}
           <View className="bg-[#0B1120]/90 border border-slate-800 p-3 rounded-2xl flex-row items-center justify-between">
             <Pressable
               onPress={() => router.push("/(tabs)/profile")}
@@ -349,7 +373,7 @@ export default function HomePage() {
           </View>
         </View>
 
-        {/* 2. 2x2 MODERN BENTO GRID (Only the 4 Real Working Features!) */}
+        {/* 2. 2x2 MODERN BENTO GRID */}
         <View className="px-4 mt-5">
           <View className="flex-row items-center justify-between mb-3 px-1">
             <Text
@@ -630,7 +654,7 @@ export default function HomePage() {
           </Pressable>
         </View>
 
-        {/* 4. SMART QUICK ACTIONS (Live Due Contact + Instant Focus Setup) */}
+        {/* 4. SMART QUICK ACTIONS */}
         <View className="px-4 mt-5">
           <Text
             allowFontScaling={false}
@@ -639,7 +663,6 @@ export default function HomePage() {
             Quick Actions
           </Text>
 
-          {/* Action 1: Live Due Contact Card (or Add Contact Prompt) */}
           {primaryDueContact ? (
             <View className="bg-[#131C31] border border-emerald-500/30 p-4 rounded-3xl mb-3">
               <View className="flex-row items-center justify-between mb-3">
@@ -770,13 +793,66 @@ export default function HomePage() {
                 allowFontScaling={false}
                 className="text-slate-400 text-xs mt-0.5"
               >
-                সেশন লক (সর্বোচ্চ ৬ ঘণ্টা) • শিডিউল লক (সর্বোচ্চ ১০ ঘণ্টা)
+                সেশন লক (সর্বোচ্চ ৬ ঘণ্টা) • শিডিউল লক (সর্বোচ্চ ১৫ ঘণ্টা)
               </Text>
             </View>
             <Ionicons name="chevron-forward" size={18} color="#64748B" />
           </TouchableOpacity>
         </View>
       </ScrollView>
+
+      {/* MODERN CUSTOM MODAL (Replaces default Alert.alert) */}
+      <Modal
+        visible={uiModal.visible}
+        transparent
+        animationType="fade"
+        onRequestClose={() =>
+          setUiModal((prev) => ({ ...prev, visible: false }))
+        }
+      >
+        <View className="flex-1 bg-black/80 justify-center items-center px-6">
+          <View className="bg-[#131C31] w-full rounded-3xl p-6 border border-slate-700 items-center">
+            <View
+              style={{
+                backgroundColor: `${uiModal.color}20`,
+                borderColor: `${uiModal.color}50`,
+              }}
+              className="w-16 h-16 rounded-2xl items-center justify-center mb-4 border"
+            >
+              <MaterialCommunityIcons
+                name={uiModal.icon}
+                size={34}
+                color={uiModal.color}
+              />
+            </View>
+            <Text
+              allowFontScaling={false}
+              className="text-white font-black text-lg text-center mb-2"
+            >
+              {uiModal.title}
+            </Text>
+            <Text
+              allowFontScaling={false}
+              className="text-slate-300 text-xs text-center leading-5 mb-5"
+            >
+              {uiModal.message}
+            </Text>
+            <Pressable
+              onPress={() =>
+                setUiModal((prev) => ({ ...prev, visible: false }))
+              }
+              className="w-full bg-indigo-600 py-3.5 rounded-2xl items-center active:bg-indigo-700"
+            >
+              <Text
+                allowFontScaling={false}
+                className="text-white font-black text-xs uppercase tracking-wider"
+              >
+                ঠিক আছে
+              </Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }

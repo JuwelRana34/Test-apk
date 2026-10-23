@@ -8,18 +8,21 @@ import {
 } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import { StatusBar } from "expo-status-bar";
+import * as SystemUI from "expo-system-ui";
 import { useEffect, useState } from "react";
 import { AppState, NativeModules, Platform } from "react-native";
 import "../global.css";
 import {
+  clearAllLocalAccountData,
   ensureNotificationChannelsAndPermissions,
   registerExpoPushTokenOnlineOffline,
   restoreCloudBackupAfterGoogleLogin,
-  syncLocalDataToCloudIfOnline,
   supabase,
+  syncLocalDataToCloudIfOnline,
 } from "../lib/supabase";
 
 SplashScreen.preventAutoHideAsync();
+void SystemUI.setBackgroundColorAsync("#0B1120");
 
 const { FocusLock } = NativeModules;
 
@@ -34,6 +37,11 @@ export default function RootLayout() {
   const rootNavigationState = useRootNavigationState();
 
   useEffect(() => {
+    void SystemUI.setBackgroundColorAsync("#0B1120");
+    if (Platform.OS === "android" && FocusLock?.applyDarkNavigationBar) {
+      void FocusLock.applyDarkNavigationBar();
+    }
+
     const initAuthAndNotifications = async () => {
       void ensureNotificationChannelsAndPermissions();
       void registerExpoPushTokenOnlineOffline();
@@ -54,8 +62,8 @@ export default function RootLayout() {
         if (session) {
           setHasOfflineSession(true);
           await AsyncStorage.setItem("@is_logged_in", "true");
-          void restoreCloudBackupAfterGoogleLogin();
-          void syncLocalDataToCloudIfOnline();
+          await restoreCloudBackupAfterGoogleLogin();
+          await syncLocalDataToCloudIfOnline();
         } else if (!isOfflineLogged) {
           setHasOfflineSession(false);
         }
@@ -76,10 +84,10 @@ export default function RootLayout() {
       if (event === "SIGNED_IN" || event === "TOKEN_REFRESHED") {
         setHasOfflineSession(true);
         await AsyncStorage.setItem("@is_logged_in", "true");
-        void restoreCloudBackupAfterGoogleLogin();
+        await restoreCloudBackupAfterGoogleLogin();
       } else if (event === "SIGNED_OUT") {
         setHasOfflineSession(false);
-        await AsyncStorage.removeItem("@is_logged_in");
+        await clearAllLocalAccountData();
       }
     });
 
@@ -92,6 +100,9 @@ export default function RootLayout() {
     const checkAndEnforceLockScreen = async () => {
       if (Platform.OS !== "android" || !FocusLock?.getFocusSessionState) return;
       try {
+        if (FocusLock.applyDarkNavigationBar) {
+          void FocusLock.applyDarkNavigationBar();
+        }
         const state = await FocusLock.getFocusSessionState();
         const isLockedNow =
           state?.active &&
@@ -156,8 +167,14 @@ export default function RootLayout() {
 
   return (
     <>
-      <StatusBar style="dark" />
-      <Stack screenOptions={{ headerShown: false, animation: "fade" }}>
+      <StatusBar style="light" backgroundColor="#0B1120" />
+      <Stack
+        screenOptions={{
+          headerShown: false,
+          animation: "fade",
+          contentStyle: { backgroundColor: "#0B1120" },
+        }}
+      >
         <Stack.Screen name="(tabs)" />
         <Stack.Screen name="(auth)" />
         <Stack.Screen

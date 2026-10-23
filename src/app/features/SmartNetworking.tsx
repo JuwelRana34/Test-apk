@@ -10,7 +10,6 @@ import React, {
 } from "react";
 import {
   ActivityIndicator,
-  Alert,
   AppState,
   FlatList,
   Keyboard,
@@ -209,6 +208,23 @@ export default function SmartNetworkingScreen() {
   const [customNoteInput, setCustomNoteInput] = useState("");
   const [keyboardHeight, setKeyboardHeight] = useState(0);
 
+  // Modern Custom Modal State (Replaces all default Alert.alert!)
+  const [uiModal, setUiModal] = useState<{
+    visible: boolean;
+    title: string;
+    message: string;
+    icon: keyof typeof MaterialCommunityIcons.glyphMap;
+    color: string;
+    confirmText?: string;
+    onConfirm?: () => void;
+  }>({
+    visible: false,
+    title: "",
+    message: "",
+    icon: "check-decagram",
+    color: "#34D399",
+  });
+
   const [appStats, setAppStats] = useState<AppStats>({
     currentStreak: 0,
     longestStreak: 0,
@@ -218,7 +234,6 @@ export default function SmartNetworkingScreen() {
   const pendingCallContactIdRef = useRef<string | null>(null);
   const appState = useRef(AppState.currentState);
 
-  // Track keyboard height so note input and search input are never hidden!
   useEffect(() => {
     const showSub = Keyboard.addListener("keyboardDidShow", (e) => {
       setKeyboardHeight(e.endCoordinates?.height || 0);
@@ -363,10 +378,13 @@ export default function SmartNetworkingScreen() {
   ) => {
     if (type === "done") {
       await markContactAsSpoken(contact.id);
-      Alert.alert(
-        "সম্পন্ন হয়েছে",
-        `${contact.name}-এর সাথে যোগাযোগ রেকর্ড করা হয়েছে। পরবর্তী রিমাইন্ডার নতুন একটি র‍্যান্ডম তারিখে সন্ধ্যা ৭টায় সেট হয়ে গেছে!`,
-      );
+      setUiModal({
+        visible: true,
+        title: "যোগাযোগ সম্পন্ন হয়েছে!",
+        message: `${contact.name}-এর সাথে যোগাযোগ রেকর্ড করা হয়েছে। পরবর্তী রিমাইন্ডার নতুন একটি র‍্যান্ডম তারিখে সন্ধ্যা ৭টায় সেট হয়ে গেছে!`,
+        icon: "check-decagram",
+        color: "#34D399",
+      });
       return;
     }
 
@@ -417,16 +435,25 @@ export default function SmartNetworkingScreen() {
     if (!selectedContactToAdd) return;
     const phone = selectedContactToAdd.phoneNumbers?.[0]?.number || "";
     if (!phone) {
-      Alert.alert("নাম্বার পাওয়া যায়নি", "এই কন্টাক্টের কোনো ফোন নাম্বার নেই।");
+      setUiModal({
+        visible: true,
+        title: "নাম্বার পাওয়া যায়নি",
+        message: "এই কন্টাক্টের কোনো ফোন নাম্বার নেই।",
+        icon: "phone-alert",
+        color: "#F43F5E",
+      });
       return;
     }
 
     if (contacts.some((c) => c.id === selectedContactToAdd.id)) {
-      Alert.alert(
-        "আগে থেকেই আছে",
-        "এই কন্টাক্টটি আপনার লিস্টে ইতিমধ্যেই যুক্ত আছে।",
-      );
       setSelectedContactToAdd(null);
+      setUiModal({
+        visible: true,
+        title: "আগে থেকেই যুক্ত আছে",
+        message: "এই কন্টাক্টটি আপনার রিমাইন্ডার লিস্টে ইতিমধ্যেই যুক্ত আছে।",
+        icon: "account-check-outline",
+        color: "#FBBF24",
+      });
       return;
     }
 
@@ -453,24 +480,21 @@ export default function SmartNetworkingScreen() {
     void syncLocalDataToCloudIfOnline();
   };
 
-  const deleteContact = async (id: string, name: string) => {
-    Alert.alert(
-      "কন্টাক্ট মুছে ফেলবেন?",
-      `আপনি কি "${name}"-কে রিমাইন্ডার লিস্ট থেকে মুছে ফেলতে চান?`,
-      [
-        { text: "না", style: "cancel" },
-        {
-          text: "হ্যাঁ, মুছুন",
-          style: "destructive",
-          onPress: async () => {
-            const updated = contacts.filter((c) => c.id !== id);
-            await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
-            await loadContactsAndScheduleNotifications();
-            void syncLocalDataToCloudIfOnline();
-          },
-        },
-      ],
-    );
+  const deleteContact = (id: string, name: string) => {
+    setUiModal({
+      visible: true,
+      title: "কন্টাক্ট মুছে ফেলবেন?",
+      message: `আপনি কি "${name}"-কে রিমাইন্ডার লিস্ট থেকে মুছে ফেলতে চান?`,
+      icon: "trash-can-outline",
+      color: "#F43F5E",
+      confirmText: "হ্যাঁ, মুছুন",
+      onConfirm: async () => {
+        const updated = contacts.filter((c) => c.id !== id);
+        await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+        await loadContactsAndScheduleNotifications();
+        void syncLocalDataToCloudIfOnline();
+      },
+    });
   };
 
   const cycleContactCategory = async (
@@ -521,7 +545,7 @@ export default function SmartNetworkingScreen() {
       className="flex-1 bg-[#0B1120]"
       edges={["top", "bottom", "left", "right"]}
     >
-      <StatusBar style="light" />
+      <StatusBar style="light" backgroundColor="#0B1120" />
 
       {/* HEADER */}
       <View className="px-4 pt-3 pb-1">
@@ -552,10 +576,14 @@ export default function SmartNetworkingScreen() {
                   sample ? getCategoryConfig(sample.category).label : undefined,
                 );
                 if (!ok) {
-                  Alert.alert(
-                    "Notification Permission",
-                    "নোটিফিকেশন পাওয়ার জন্য ফোনের Notification Permission অন করুন।",
-                  );
+                  setUiModal({
+                    visible: true,
+                    title: "Notification Permission",
+                    message:
+                      "নোটিফিকেশন পাওয়ার জন্য ফোনের Notification Permission অন করুন।",
+                    icon: "bell-alert-outline",
+                    color: "#FBBF24",
+                  });
                 }
               }}
               className="bg-emerald-600/20 border border-emerald-500/40 h-10 px-2.5 items-center justify-center rounded-xl flex-row"
@@ -698,7 +726,7 @@ export default function SmartNetworkingScreen() {
                     </View>
 
                     <Pressable
-                      onPress={() => void deleteContact(item.id, item.name)}
+                      onPress={() => deleteContact(item.id, item.name)}
                       className="p-2 rounded-xl bg-[#0B1120] border border-slate-800"
                     >
                       <Feather name="trash-2" size={15} color="#F43F5E" />
@@ -821,7 +849,10 @@ export default function SmartNetworkingScreen() {
               keyboardShouldPersistTaps="handled"
               contentContainerStyle={{
                 paddingHorizontal: 20,
-                paddingBottom: Math.max(28, insets.bottom + keyboardHeight + 16),
+                paddingBottom: Math.max(
+                  28,
+                  insets.bottom + keyboardHeight + 16,
+                ),
               }}
               renderItem={({ item }) => (
                 <Pressable
@@ -852,7 +883,7 @@ export default function SmartNetworkingScreen() {
         </SafeAreaView>
       </Modal>
 
-      {/* 3-CATEGORY SELECTION MODAL (Keyboard-Safe!) */}
+      {/* 3-CATEGORY SELECTION MODAL */}
       <Modal transparent visible={!!selectedContactToAdd} animationType="fade">
         <KeyboardAvoidingView
           behavior={Platform.OS === "ios" ? "padding" : "height"}
@@ -950,6 +981,93 @@ export default function SmartNetworkingScreen() {
             </ScrollView>
           </View>
         </KeyboardAvoidingView>
+      </Modal>
+
+      {/* MODERN CUSTOM MODAL (Replaces all default Alert.alert!) */}
+      <Modal
+        visible={uiModal.visible}
+        transparent
+        animationType="fade"
+        onRequestClose={() =>
+          setUiModal((prev) => ({ ...prev, visible: false }))
+        }
+      >
+        <View className="flex-1 bg-black/80 justify-center items-center px-6">
+          <View className="bg-[#131C31] w-full rounded-3xl p-6 border border-slate-700 items-center">
+            <View
+              style={{
+                backgroundColor: `${uiModal.color}20`,
+                borderColor: `${uiModal.color}50`,
+              }}
+              className="w-16 h-16 rounded-2xl items-center justify-center mb-4 border"
+            >
+              <MaterialCommunityIcons
+                name={uiModal.icon}
+                size={32}
+                color={uiModal.color}
+              />
+            </View>
+            <Text
+              allowFontScaling={false}
+              className="text-white font-black text-lg text-center mb-2"
+            >
+              {uiModal.title}
+            </Text>
+            <Text
+              allowFontScaling={false}
+              className="text-slate-300 text-xs text-center leading-5 mb-5"
+            >
+              {uiModal.message}
+            </Text>
+
+            {uiModal.onConfirm ? (
+              <View className="flex-row gap-3 w-full">
+                <Pressable
+                  onPress={() =>
+                    setUiModal((prev) => ({ ...prev, visible: false }))
+                  }
+                  className="flex-1 bg-slate-800 py-3.5 rounded-2xl items-center border border-slate-700"
+                >
+                  <Text
+                    allowFontScaling={false}
+                    className="text-slate-200 font-bold text-xs"
+                  >
+                    না
+                  </Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => {
+                    const fn = uiModal.onConfirm;
+                    setUiModal((prev) => ({ ...prev, visible: false }));
+                    if (fn) fn();
+                  }}
+                  className="flex-1 bg-rose-600 py-3.5 rounded-2xl items-center active:bg-rose-700"
+                >
+                  <Text
+                    allowFontScaling={false}
+                    className="text-white font-black text-xs"
+                  >
+                    {uiModal.confirmText || "হ্যাঁ, মুছুন"}
+                  </Text>
+                </Pressable>
+              </View>
+            ) : (
+              <Pressable
+                onPress={() =>
+                  setUiModal((prev) => ({ ...prev, visible: false }))
+                }
+                className="w-full bg-indigo-600 py-3.5 rounded-2xl items-center active:bg-indigo-700"
+              >
+                <Text
+                  allowFontScaling={false}
+                  className="text-white font-black text-xs uppercase tracking-wider"
+                >
+                  ঠিক আছে
+                </Text>
+              </Pressable>
+            )}
+          </View>
+        </View>
       </Modal>
     </SafeAreaView>
   );

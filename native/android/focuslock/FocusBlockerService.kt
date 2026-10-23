@@ -34,6 +34,7 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
+import org.json.JSONArray
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -136,7 +137,7 @@ class FocusBlockerService : AccessibilityService() {
         cachedNewsPlusPackages?.let { if (it.isNotEmpty()) return it }
         val result = HashSet<String>()
         result.add("com.google.android.apps.docs") // Google Drive PDF Viewer
-        result.add("cn.wps.moffice_eng") // WPS / Realme default office viewer if present
+        result.add("cn.wps.moffice_eng")
         result.add("com.adobe.reader")
         try {
             val pm = packageManager
@@ -208,6 +209,84 @@ class FocusBlockerService : AccessibilityService() {
             }
         }
         return result
+    }
+
+    // 🌟 Extracts user's whitelisted Study Channels + Today's Study Video keywords/titles
+    private fun getStudyKeywordsList(prefs: android.content.SharedPreferences): List<String> {
+        val list = ArrayList<String>()
+        val channelsCsv = prefs.getString("STUDY_YT_CHANNELS_CSV", "") ?: ""
+        if (channelsCsv.isNotEmpty()) {
+            channelsCsv.split(",").forEach { ch ->
+                val clean = ch.trim().lowercase()
+                if (clean.length >= 2) list.add(clean)
+            }
+        }
+
+        val todayStr = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+        val videosDate = prefs.getString("STUDY_YT_VIDEOS_DATE", "") ?: ""
+        if (videosDate == todayStr) {
+            val videosJson = prefs.getString("STUDY_YT_VIDEOS_JSON", "[]") ?: "[]"
+            try {
+                val arr = JSONArray(videosJson)
+                for (i in 0 until arr.length()) {
+                    val obj = arr.optJSONObject(i) ?: continue
+                    val title = obj.optString("title", "").trim().lowercase()
+                    val raw = obj.optString("raw", "").trim().lowercase()
+                    if (title.length >= 2 && !title.startsWith("http")) {
+                        list.add(title)
+                    }
+                    if (raw.length >= 2 && !raw.startsWith("http")) {
+                        list.add(raw)
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+        return list
+    }
+
+    // Checks if current YouTube screen matches a saved Study Channel or Today's Class Video!
+    private fun isWatchingStudyChannelOrVideo(
+        rootNode: AccessibilityNodeInfo?,
+        prefs: android.content.SharedPreferences
+    ): Boolean {
+        val now = System.currentTimeMillis()
+        // If user launched a saved Study Class Video directly from Lock Screen within the last 3 minutes and is still in YouTube player
+        val studyLaunchUntil = prefs.getLong("LAST_LAUNCHED_STUDY_YT_UNTIL", 0L)
+        if (now < studyLaunchUntil) {
+            return true
+        }
+
+        val keywords = getStudyKeywordsList(prefs)
+        if (keywords.isEmpty() || rootNode == null) return false
+
+        return checkNodeTreeForStudyKeywords(rootNode, keywords, 0)
+    }
+
+    private fun checkNodeTreeForStudyKeywords(
+        node: AccessibilityNodeInfo?,
+        keywords: List<String>,
+        depth: Int
+    ): Boolean {
+        if (node == null || depth > 14 || !node.isVisibleToUser) return false
+        val txt = node.text?.toString()?.lowercase() ?: ""
+        val desc = node.contentDescription?.toString()?.lowercase() ?: ""
+
+        if (txt.isNotEmpty() || desc.isNotEmpty()) {
+            for (kw in keywords) {
+                if ((txt.isNotEmpty() && txt.contains(kw)) ||
+                    (desc.isNotEmpty() && desc.contains(kw))
+                ) {
+                    return true
+                }
+            }
+        }
+
+        for (i in 0 until node.childCount) {
+            if (checkNodeTreeForStudyKeywords(node.getChild(i), keywords, depth + 1)) {
+                return true
+            }
+        }
+        return false
     }
 
     private fun showInstantAlert(message: String) {
@@ -358,10 +437,7 @@ class FocusBlockerService : AccessibilityService() {
 
                 val isFloatingPiP = winArea in 1000..(screenArea * 60 / 100)
                 if (isFloatingPiP) {
-                    val isYtOverQuota = pkg == "com.google.android.youtube" &&
-                        prefs.getLong("YT_USED_MILLIS", 0L) >= prefs.getInt("YT_LIMIT_MINUTES", 90) * 60 * 1000L
-
-                    if (!allowedApps.contains(pkg) || pkg == "com.google.android.youtube" || isYtOverQuota) {
+                    if (!allowedApps.contains(pkg) || pkg == "com.google.android.youtube") {
                         stopAllBackgroundMediaAndPiP()
                         performGlobalAction(GLOBAL_ACTION_BACK)
                     }
@@ -562,7 +638,7 @@ class FocusBlockerService : AccessibilityService() {
         val eventClassName = event.className?.toString() ?: ""
         val lowerClass = eventClassName.lowercase()
 
-        // 🌟 0.01s Instant Pull-Back on Recents / Overview Button Press (Even from Allowed Apps or PDF Readers!)
+        // 0.01s Instant Pull-Back on Recents / Overview Button Press (Even from Allowed Apps or PDF Readers!)
         if (eventPackageName == "com.android.systemui") {
             val isRecentsOpened = eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
                 (lowerClass.contains("recents") ||
@@ -571,19 +647,23 @@ class FocusBlockerService : AccessibilityService() {
             if (isRecentsOpened && !inBreak) {
                 stopYouTubeTracker()
                 stopAllBackgroundMediaAndPiP()
-                prefs.edit().putLong("WHITELIST_GRACE_UNTIL", 0L).apply()
+                prefs.edit()
+                    .putLong("WHITELIST_GRACE_UNTIL", 0L)
+                    .putLong("LAST_LAUNCHED_STUDY_YT_UNTIL", 0L)
+                    .apply()
                 performGlobalAction(GLOBAL_ACTION_BACK)
                 redirectToMainActivity(force = true)
             }
             return
         }
 
-        // 🌟 0.01s Instant Pull-Back on Home Button / Gesture to Launcher (Even if rootInActiveWindow still lags on Allowed App or PDF Reader!)
+        // 0.01s Instant Pull-Back on Home Button / Gesture to Launcher
         if (!inBreak && eventPackageName != null && isHomeLauncherPackage(eventPackageName)) {
             val graceUntil = prefs.getLong("WHITELIST_GRACE_UNTIL", 0L)
             if (now >= graceUntil) {
                 stopYouTubeTracker()
                 stopAllBackgroundMediaAndPiP()
+                prefs.edit().putLong("LAST_LAUNCHED_STUDY_YT_UNTIL", 0L).apply()
                 redirectToMainActivity(force = true)
                 return
             }
@@ -650,7 +730,7 @@ class FocusBlockerService : AccessibilityService() {
             return
         }
 
-        // 🌟 Default PDF Readers (News Plus PDF Viewer + Google Drive PDF Viewer + any PDF Viewer activity) with PDF-Only Guard!
+        // Default PDF Readers (News Plus PDF Viewer + Google Drive PDF Viewer + any PDF Viewer activity) with PDF-Only Guard!
         val pdfReaders = getPdfReaderPackages()
         val isPdfReaderActive = pdfReaders.contains(packageName) ||
             (rootPackageName != null && pdfReaders.contains(rootPackageName) && !isHomeLauncherPackage(packageName)) ||
@@ -659,7 +739,6 @@ class FocusBlockerService : AccessibilityService() {
 
         if (isPdfReaderActive) {
             stopYouTubeTracker()
-            // Clear launch grace as soon as PDF reader is open so pressing Home/Recents later pulls back in 0.01s!
             prefs.edit().putLong("WHITELIST_GRACE_UNTIL", 0L).apply()
             if (containsVideoOrDisallowedFeedInPdfReader(rootNode, eventClassName)) {
                 stopAllBackgroundMediaAndPiP()
@@ -670,12 +749,22 @@ class FocusBlockerService : AccessibilityService() {
             return
         }
 
-        // 🌟 WHITELISTED APPS HANDLING
+        // 🌟 WHITELISTED APPS & STUDY YOUTUBE HANDLING
+        val isStudyYtLaunchActive = (packageName == "com.google.android.youtube" || rootPackageName == "com.google.android.youtube") &&
+            (now < prefs.getLong("LAST_LAUNCHED_STUDY_YT_UNTIL", 0L) || getStudyKeywordsList(prefs).isNotEmpty())
+
         val isAllowedApp = allowedApps.contains(packageName) ||
-            (rootPackageName != null && allowedApps.contains(rootPackageName) && !isHomeLauncherPackage(packageName))
+            (rootPackageName != null && allowedApps.contains(rootPackageName) && !isHomeLauncherPackage(packageName)) ||
+            isStudyYtLaunchActive
 
         if (isAllowedApp) {
-            val activeAllowedPkg = if (allowedApps.contains(packageName)) packageName else rootPackageName!!
+            val activeAllowedPkg = if (packageName == "com.google.android.youtube" || rootPackageName == "com.google.android.youtube") {
+                "com.google.android.youtube"
+            } else if (allowedApps.contains(packageName)) {
+                packageName
+            } else {
+                rootPackageName ?: packageName
+            }
 
             // Clear launch grace as soon as the allowed app is in foreground so Home/Recents pulls back in 0.01s!
             if (prefs.getLong("WHITELIST_GRACE_UNTIL", 0L) > 0L) {
@@ -684,17 +773,39 @@ class FocusBlockerService : AccessibilityService() {
 
             if (activeAllowedPkg == "com.google.android.youtube") {
                 resetDailyYouTubeQuotaIfNeeded(prefs)
-                val usedMillis = prefs.getLong("YT_USED_MILLIS", 0L)
-                val limitMinutes = prefs.getInt("YT_LIMIT_MINUTES", 90)
-                val limitMillis = limitMinutes * 60 * 1000L
+                val generalUsedMillis = prefs.getLong("YT_USED_MILLIS", 0L)
+                val generalLimitMinutes = prefs.getInt("YT_LIMIT_MINUTES", 30).coerceIn(15, 45)
+                val generalLimitMillis = generalLimitMinutes * 60 * 1000L
 
-                if (usedMillis >= limitMillis) {
-                    stopYouTubeTracker()
-                    stopAllBackgroundMediaAndPiP()
-                    performGlobalAction(GLOBAL_ACTION_BACK)
-                    showInstantAlert("⏳ আজকের YouTube লং ভিডিওর সময়সীমা ($limitMinutes মিনিট) শেষ!")
-                    redirectToMainActivity(force = true)
-                    return
+                val studyUsedMillis = prefs.getLong("YT_STUDY_USED_MILLIS", 0L)
+                val studyLimitMinutes = prefs.getInt("YT_STUDY_LIMIT_MINUTES", 210).coerceIn(90, 210)
+                val studyLimitMillis = studyLimitMinutes * 60 * 1000L
+
+                val isStudyMatch = isWatchingStudyChannelOrVideo(rootNode, prefs)
+
+                if (isStudyMatch) {
+                    if (studyUsedMillis >= studyLimitMillis) {
+                        stopYouTubeTracker()
+                        stopAllBackgroundMediaAndPiP()
+                        performGlobalAction(GLOBAL_ACTION_BACK)
+                        showInstantAlert("⏳ আজকের ক্লাস/স্টাডি YouTube-এর সময়সীমা ($studyLimitMinutes মিনিট) শেষ!")
+                        redirectToMainActivity(force = true)
+                        return
+                    }
+                } else {
+                    if (generalUsedMillis >= generalLimitMillis) {
+                        val hasStudyItems = getStudyKeywordsList(prefs).isNotEmpty()
+                        stopYouTubeTracker()
+                        stopAllBackgroundMediaAndPiP()
+                        performGlobalAction(GLOBAL_ACTION_BACK)
+                        if (hasStudyItems && studyUsedMillis < studyLimitMillis) {
+                            showInstantAlert("🎓 সাধারণ YouTube ($generalLimitMinutes মিনিট) শেষ! এখন শুধু আপনার সেভ করা ক্লাসের চ্যানেল বা ভিডিও দেখা যাবে।")
+                        } else {
+                            showInstantAlert("⏳ আজকের সাধারণ YouTube লং ভিডিওর সময়সীমা ($generalLimitMinutes মিনিট) শেষ!")
+                        }
+                        redirectToMainActivity(force = true)
+                        return
+                    }
                 }
 
                 startYouTubeTracker(prefs)
@@ -856,10 +967,18 @@ class FocusBlockerService : AccessibilityService() {
         val todayStr = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
         val savedDate = prefs.getString("YT_USAGE_DATE", "") ?: ""
         if (savedDate != todayStr) {
-            prefs.edit()
+            val editor = prefs.edit()
                 .putString("YT_USAGE_DATE", todayStr)
                 .putLong("YT_USED_MILLIS", 0L)
-                .commit()
+                .putLong("YT_STUDY_USED_MILLIS", 0L)
+
+            // Auto-clear yesterday's class videos at midnight while keeping permanent study channels intact!
+            val videosDate = prefs.getString("STUDY_YT_VIDEOS_DATE", "") ?: ""
+            if (videosDate.isNotEmpty() && videosDate != todayStr) {
+                editor.putString("STUDY_YT_VIDEOS_JSON", "[]")
+                editor.putString("STUDY_YT_VIDEOS_DATE", todayStr)
+            }
+            editor.commit()
         }
     }
 
@@ -872,7 +991,8 @@ class FocusBlockerService : AccessibilityService() {
             override fun run() {
                 if (!isYtForeground) return
 
-                val currentRootPkg = rootInActiveWindow?.packageName?.toString() ?: ""
+                val rootNode = rootInActiveWindow
+                val currentRootPkg = rootNode?.packageName?.toString() ?: ""
                 val graceUntil = prefs.getLong("WHITELIST_GRACE_UNTIL", 0L)
                 if (currentRootPkg.isNotEmpty() &&
                     currentRootPkg != "com.google.android.youtube" &&
@@ -889,19 +1009,46 @@ class FocusBlockerService : AccessibilityService() {
                 val delta = (nowRealtime - lastYtTickRealtime).coerceIn(500L, 2500L)
                 lastYtTickRealtime = nowRealtime
 
-                val usedMillis = prefs.getLong("YT_USED_MILLIS", 0L) + delta
-                prefs.edit().putLong("YT_USED_MILLIS", usedMillis).commit()
+                val isStudyMatch = isWatchingStudyChannelOrVideo(rootNode, prefs)
 
-                val limitMinutes = prefs.getInt("YT_LIMIT_MINUTES", 90)
-                val limitMillis = limitMinutes * 60 * 1000L
-                if (usedMillis >= limitMillis) {
-                    stopYouTubeTracker()
-                    stopAllBackgroundMediaAndPiP()
-                    performGlobalAction(GLOBAL_ACTION_BACK)
-                    showInstantAlert("⏳ আজকের YouTube লং ভিডিওর সময়সীমা শেষ!")
-                    redirectToMainActivity(force = true)
-                    return
+                if (isStudyMatch) {
+                    val studyUsed = prefs.getLong("YT_STUDY_USED_MILLIS", 0L) + delta
+                    prefs.edit().putLong("YT_STUDY_USED_MILLIS", studyUsed).commit()
+
+                    val studyLimitMinutes = prefs.getInt("YT_STUDY_LIMIT_MINUTES", 210).coerceIn(90, 210)
+                    val studyLimitMillis = studyLimitMinutes * 60 * 1000L
+                    if (studyUsed >= studyLimitMillis) {
+                        stopYouTubeTracker()
+                        stopAllBackgroundMediaAndPiP()
+                        performGlobalAction(GLOBAL_ACTION_BACK)
+                        showInstantAlert("⏳ আজকের ক্লাস/স্টাডি YouTube-এর সময়সীমা ($studyLimitMinutes মিনিট) শেষ!")
+                        redirectToMainActivity(force = true)
+                        return
+                    }
+                } else {
+                    val generalUsed = prefs.getLong("YT_USED_MILLIS", 0L) + delta
+                    prefs.edit().putLong("YT_USED_MILLIS", generalUsed).commit()
+
+                    val generalLimitMinutes = prefs.getInt("YT_LIMIT_MINUTES", 30).coerceIn(15, 45)
+                    val generalLimitMillis = generalLimitMinutes * 60 * 1000L
+                    if (generalUsed >= generalLimitMillis) {
+                        val hasStudyItems = getStudyKeywordsList(prefs).isNotEmpty()
+                        val studyUsed = prefs.getLong("YT_STUDY_USED_MILLIS", 0L)
+                        val studyLimitMillis = prefs.getInt("YT_STUDY_LIMIT_MINUTES", 210).coerceIn(90, 210) * 60 * 1000L
+
+                        stopYouTubeTracker()
+                        stopAllBackgroundMediaAndPiP()
+                        performGlobalAction(GLOBAL_ACTION_BACK)
+                        if (hasStudyItems && studyUsed < studyLimitMillis) {
+                            showInstantAlert("🎓 সাধারণ YouTube ($generalLimitMinutes মিনিট) শেষ! এখন শুধু আপনার সেভ করা ক্লাসের চ্যানেল বা ভিডিও দেখা যাবে।")
+                        } else {
+                            showInstantAlert("⏳ আজকের সাধারণ YouTube লং ভিডিওর সময়সীমা ($generalLimitMinutes মিনিট) শেষ!")
+                        }
+                        redirectToMainActivity(force = true)
+                        return
+                    }
                 }
+
                 ytHandler.postDelayed(this, 1000L)
             }
         }, 1000L)
@@ -936,6 +1083,7 @@ class FocusBlockerService : AccessibilityService() {
 
         prefs.edit()
             .putBoolean("IS_SESSION_ACTIVE", false)
+            .putLong("LAST_LAUNCHED_STUDY_YT_UNTIL", 0L)
             .remove("SESSION_END_TIME")
             .remove("SESSION_START_TIME")
             .remove("SESSION_START_REALTIME")
@@ -1019,7 +1167,7 @@ class FocusBlockerService : AccessibilityService() {
                 "Session Lock (25m/5m) Active"
             }
             builder.setContentTitle(modeTitle)
-            builder.setContentText("Only whitelisted apps, sites & study PDFs allowed.")
+            builder.setContentText("Only whitelisted apps, sites & study classes allowed.")
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 builder.setUsesChronometer(true)

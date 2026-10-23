@@ -2,7 +2,7 @@ import { Feather, Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useFocusEffect, useIsFocused, useRouter } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import React, { useCallback, useMemo, useState } from "react";
-import { Alert, FlatList, Linking, Pressable, Text, View } from "react-native";
+import { FlatList, Linking, Modal, Pressable, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
   AppNoticeItem,
@@ -19,6 +19,10 @@ export default function Notice() {
   const insets = useSafeAreaInsets();
   const [notices, setNotices] = useState<AppNoticeItem[]>([]);
   const [filter, setFilter] = useState<"all" | "contact" | "lock">("all");
+
+  // Modern Custom Modal State (Replaces all default Alert.alert!)
+  const [clearAllModalVisible, setClearAllModalVisible] = useState(false);
+  const [permModalVisible, setPermModalVisible] = useState(false);
 
   const loadNotices = useCallback(async () => {
     const items = await getInAppNotices();
@@ -43,21 +47,13 @@ export default function Notice() {
 
   const handleClearAll = () => {
     if (notices.length === 0) return;
-    Alert.alert(
-      "সব নোটিফিকেশন মুছে ফেলবেন?",
-      "আপনি কি নিশ্চিতভাবে সব নোটিফিকেশন লিস্ট থেকে মুছে ফেলতে চান?",
-      [
-        { text: "না", style: "cancel" },
-        {
-          text: "হ্যাঁ, সব মুছুন",
-          style: "destructive",
-          onPress: async () => {
-            await clearAllInAppNotices();
-            setNotices([]);
-          },
-        },
-      ],
-    );
+    setClearAllModalVisible(true);
+  };
+
+  const confirmClearAll = async () => {
+    setClearAllModalVisible(false);
+    await clearAllInAppNotices();
+    setNotices([]);
   };
 
   const handleTestPushNotification = async () => {
@@ -65,10 +61,7 @@ export default function Notice() {
     if (ok) {
       await loadNotices();
     } else {
-      Alert.alert(
-        "Permission Required",
-        "ফোনের সেটিংস থেকে Notification পারমিশন অন করুন।",
-      );
+      setPermModalVisible(true);
     }
   };
 
@@ -93,9 +86,9 @@ export default function Notice() {
 
   return (
     <View className="flex-1 bg-[#0B1120]">
-      {isFocused && <StatusBar style="light" />}
+      {isFocused && <StatusBar style="light" backgroundColor="#131C31" />}
 
-      {/* 🌟 Overflow-Proof Two-Row Modern Header & Filter Tabs */}
+      {/* Overflow-Proof Two-Row Modern Header & Filter Tabs */}
       <View
         style={{ paddingTop: Math.max(16, insets.top + 8) }}
         className="bg-[#131C31] px-5 pb-4 rounded-b-[28px] border-b border-slate-800"
@@ -130,7 +123,7 @@ export default function Notice() {
           </View>
         </View>
 
-        {/* Row 2: 3 Clean Action Buttons (Never overlaps!) */}
+        {/* Row 2: 3 Clean Action Buttons */}
         <View className="flex-row items-center gap-2 mb-3">
           <Pressable
             onPress={() => void handleTestPushNotification()}
@@ -401,6 +394,103 @@ export default function Notice() {
           }}
         />
       )}
+
+      {/* MODERN CLEAR ALL CONFIRMATION MODAL */}
+      <Modal
+        visible={clearAllModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setClearAllModalVisible(false)}
+      >
+        <View className="flex-1 bg-black/80 justify-center items-center px-6">
+          <View className="bg-[#131C31] w-full rounded-3xl p-6 border border-rose-500/30 items-center">
+            <View className="w-16 h-16 rounded-2xl bg-rose-500/15 border border-rose-500/40 items-center justify-center mb-4">
+              <Feather name="trash-2" size={30} color="#F43F5E" />
+            </View>
+            <Text
+              allowFontScaling={false}
+              className="text-white font-black text-lg text-center mb-2"
+            >
+              সব নোটিফিকেশন মুছে ফেলবেন?
+            </Text>
+            <Text
+              allowFontScaling={false}
+              className="text-slate-300 text-xs text-center leading-5 mb-5"
+            >
+              আপনি কি নিশ্চিতভাবে আপনার নোটিফিকেশন লিস্টের সবগুলো অ্যালার্ট মুছে
+              ফেলতে চান?
+            </Text>
+            <View className="flex-row gap-3 w-full">
+              <Pressable
+                onPress={() => setClearAllModalVisible(false)}
+                className="flex-1 bg-slate-800 py-3.5 rounded-2xl items-center border border-slate-700"
+              >
+                <Text
+                  allowFontScaling={false}
+                  className="text-slate-200 font-bold text-xs"
+                >
+                  ফিরে যান
+                </Text>
+              </Pressable>
+              <Pressable
+                onPress={() => void confirmClearAll()}
+                className="flex-1 bg-rose-600 py-3.5 rounded-2xl items-center active:bg-rose-700"
+              >
+                <Text
+                  allowFontScaling={false}
+                  className="text-white font-black text-xs"
+                >
+                  হ্যাঁ, সব মুছুন
+                </Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* MODERN PERMISSION INFO MODAL */}
+      <Modal
+        visible={permModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setPermModalVisible(false)}
+      >
+        <View className="flex-1 bg-black/80 justify-center items-center px-6">
+          <View className="bg-[#131C31] w-full rounded-3xl p-6 border border-amber-500/30 items-center">
+            <View className="w-16 h-16 rounded-2xl bg-amber-500/15 border border-amber-500/40 items-center justify-center mb-4">
+              <MaterialCommunityIcons
+                name="bell-alert-outline"
+                size={32}
+                color="#FBBF24"
+              />
+            </View>
+            <Text
+              allowFontScaling={false}
+              className="text-white font-black text-lg text-center mb-2"
+            >
+              Notification পারমিশন প্রয়োজন
+            </Text>
+            <Text
+              allowFontScaling={false}
+              className="text-slate-300 text-xs text-center leading-5 mb-5"
+            >
+              রিমাইন্ডার পাওয়ার জন্য ফোনের সেটিংস থেকে Notification পারমিশন অন
+              করুন।
+            </Text>
+            <Pressable
+              onPress={() => setPermModalVisible(false)}
+              className="w-full bg-indigo-600 py-3.5 rounded-2xl items-center"
+            >
+              <Text
+                allowFontScaling={false}
+                className="text-white font-black text-xs"
+              >
+                ঠিক আছে
+              </Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }

@@ -28,6 +28,7 @@ export const CONTACT_REMINDER_CHANNEL = "contact-reminders-v2";
 export const FOCUS_LOCK_CHANNEL = "focus-lock-alerts";
 export const IN_APP_NOTICES_KEY = "@jnuits_in_app_notices";
 export const EXPO_PUSH_TOKEN_KEY = "@jnuits_expo_push_token";
+export const ACTIVE_USER_ID_KEY = "@jnuits_active_user_id";
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
 export interface AppNoticeItem {
@@ -375,7 +376,7 @@ export async function clearAllInAppNotices(): Promise<void> {
 }
 
 // ============================================================================
-// ANTI-CHEAT OFFLINE-FIRST SYNC & GOOGLE PROFILE BACKUP ENGINE
+// 100% ACCOUNT-WISE ISOLATION & CLOUD BACKUP ENGINE
 // ============================================================================
 
 export const OFFLINE_SYNC_QUEUE_KEY = "@jnuits_offline_dirty_flag";
@@ -392,9 +393,54 @@ export interface CachedUserProfile {
 }
 
 /**
- * Anti-Cheat Online Pass Spending Check:
- * Verifies internet connection & updates `totalPassesUsed` in Supabase Cloud FIRST
- * before unlocking so user cannot spend pass offline and Clear App Data!
+ * 🌟 Completely clears previous Gmail's local AsyncStorage and native SharedPreferences
+ * so logging in with a new Gmail NEVER inherits the previous account's passes, streak, contacts, or schedules!
+ */
+export async function clearAllLocalAccountData(
+  newUserId: string = "",
+): Promise<void> {
+  try {
+    await AsyncStorage.multiRemove([
+      "@networking_contacts",
+      "@networking_stats",
+      "@focus_allowed_apps",
+      "@focus_allowed_domains",
+      "@focus_multi_schedules",
+      "@focus_yt_limit_minutes",
+      "@focus_yt_study_limit_minutes",
+      "@focus_yt_study_channels",
+      "@focus_yt_study_videos",
+      "@focus_schedule_break_enabled",
+      IN_APP_NOTICES_KEY,
+      CACHED_USER_PROFILE_KEY,
+      OFFLINE_SYNC_QUEUE_KEY,
+    ]);
+
+    if (newUserId) {
+      await AsyncStorage.setItem(ACTIVE_USER_ID_KEY, newUserId);
+    } else {
+      await AsyncStorage.multiRemove([ACTIVE_USER_ID_KEY, "@is_logged_in"]);
+    }
+
+    if (Platform.OS === "android" && FocusLock?.resetLocalAccountData) {
+      await FocusLock.resetLocalAccountData(newUserId);
+    }
+
+    const scheduled = await Notifications.getAllScheduledNotificationsAsync();
+    for (const item of scheduled) {
+      if (
+        item.identifier.startsWith("contact-due-") ||
+        item.identifier === "daily-contact-morning" ||
+        item.identifier === "daily-contact-evening"
+      ) {
+        await Notifications.cancelScheduledNotificationAsync(item.identifier);
+      }
+    }
+  } catch {}
+}
+
+/**
+ * Anti-Cheat Online Pass Spending Check
  */
 export async function spendEmergencyPassWithCloudCheck(): Promise<boolean> {
   try {
@@ -452,6 +498,22 @@ export async function spendEmergencyPassWithCloudCheck(): Promise<boolean> {
 
 export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
   try {
+    const {
+      data: { user: currentUser },
+    } = await supabase.auth.getUser();
+
+    if (!currentUser) return false;
+
+    // 🌟 Account Switch Guard: If stored user ID differs from current logged-in Gmail, reset local state and restore ONLY this account's cloud data!
+    const storedUserId = await AsyncStorage.getItem(ACTIVE_USER_ID_KEY);
+    if (storedUserId && storedUserId !== currentUser.id) {
+      await restoreCloudBackupAfterGoogleLogin();
+      return true;
+    }
+    if (!storedUserId) {
+      await AsyncStorage.setItem(ACTIVE_USER_ID_KEY, currentUser.id);
+    }
+
     let [
       contactsRaw,
       statsRaw,
@@ -459,6 +521,8 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
       allowedDomainsRaw,
       schedulesRaw,
       ytLimitRaw,
+      ytStudyLimitRaw,
+      studyChannelsRaw,
     ] = await Promise.all([
       AsyncStorage.getItem("@networking_contacts"),
       AsyncStorage.getItem("@networking_stats"),
@@ -466,6 +530,8 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
       AsyncStorage.getItem("@focus_allowed_domains"),
       AsyncStorage.getItem("@focus_multi_schedules"),
       AsyncStorage.getItem("@focus_yt_limit_minutes"),
+      AsyncStorage.getItem("@focus_yt_study_limit_minutes"),
+      AsyncStorage.getItem("@focus_yt_study_channels"),
     ]);
 
     const todayIso = new Date().toISOString().split("T")[0];
@@ -479,6 +545,7 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
       lastCompletedDate: "",
       completedHistoryJson: "{}",
       ytUsedSeconds: 0,
+      ytStudyUsedSeconds: 0,
       ytUsageDate: todayIso,
     };
 
@@ -494,6 +561,7 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
           lastCompletedDate: s.lastCompletedDate || "",
           completedHistoryJson: s.completedHistoryJson || "{}",
           ytUsedSeconds: s.ytUsedSeconds ?? 0,
+          ytStudyUsedSeconds: s.ytStudyUsedSeconds ?? 0,
           ytUsageDate: s.ytUsageDate || todayIso,
         };
       } catch {}
@@ -501,13 +569,8 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
 
     await AsyncStorage.setItem(OFFLINE_SYNC_QUEUE_KEY, "true");
 
-    const {
-      data: { user: currentUser },
-    } = await supabase.auth.getUser();
+    const cloudBackup = currentUser.user_metadata?.jnuits_backup_v2 || {};
 
-    const cloudBackup = currentUser?.user_metadata?.jnuits_backup_v2 || {};
-
-    // 🌟 If local schedules are missing (e.g., fresh reinstall), restore schedules from Supabase Cloud immediately!
     if (
       (!schedulesRaw || schedulesRaw === "[]") &&
       Array.isArray(cloudBackup.schedules) &&
@@ -541,12 +604,13 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
       }
     }
 
-    if (!ytLimitRaw && cloudBackup.ytLimitMinutes) {
-      ytLimitRaw = String(cloudBackup.ytLimitMinutes);
-      await AsyncStorage.setItem("@focus_yt_limit_minutes", ytLimitRaw);
-      if (Platform.OS === "android" && FocusLock?.setYouTubeLimitMinutes) {
-        await FocusLock.setYouTubeLimitMinutes(cloudBackup.ytLimitMinutes);
-      }
+    if (
+      (!studyChannelsRaw || studyChannelsRaw === "[]") &&
+      Array.isArray(cloudBackup.studyChannels) &&
+      cloudBackup.studyChannels.length > 0
+    ) {
+      studyChannelsRaw = JSON.stringify(cloudBackup.studyChannels);
+      await AsyncStorage.setItem("@focus_yt_study_channels", studyChannelsRaw);
     }
 
     const cloudEarned =
@@ -568,7 +632,6 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
       mergedStreak = Math.max(mergedStreak, cloudStreak);
     }
 
-    // Merge 60-day GitHub-style daily history map monotonically
     let localHistoryObj: Record<string, number> = {};
     try {
       localHistoryObj = JSON.parse(nativeLockState.completedHistoryJson || "{}");
@@ -590,7 +653,6 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
       Object.keys(mergedHistoryObj).length,
     );
 
-    // Anti-Cheat Daily YouTube Usage Merge
     const activeDate = nativeLockState.ytUsageDate || todayIso;
     const cloudYtDate = cloudBackup.ytUsageDate || "";
     const cloudYtSecs =
@@ -598,6 +660,13 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
     const mergedYtUsedSeconds = Math.max(
       nativeLockState.ytUsedSeconds,
       cloudYtSecs,
+    );
+
+    const cloudStudySecs =
+      cloudYtDate === activeDate ? (cloudBackup.ytStudyUsedSeconds ?? 0) : 0;
+    const mergedYtStudyUsedSeconds = Math.max(
+      nativeLockState.ytStudyUsedSeconds,
+      cloudStudySecs,
     );
 
     if (Platform.OS === "android" && FocusLock?.syncPassAndStreakFromCloud) {
@@ -611,6 +680,7 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
         mergedTotalCompleted,
         activeDate,
         mergedYtUsedSeconds,
+        mergedYtStudyUsedSeconds,
       );
     }
 
@@ -645,9 +715,16 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
           : cloudBackup.schedules || [],
         ytLimitMinutes: ytLimitRaw
           ? parseInt(ytLimitRaw, 10)
-          : cloudBackup.ytLimitMinutes || 90,
+          : cloudBackup.ytLimitMinutes || 30,
+        ytStudyLimitMinutes: ytStudyLimitRaw
+          ? parseInt(ytStudyLimitRaw, 10)
+          : cloudBackup.ytStudyLimitMinutes || 210,
+        studyChannels: studyChannelsRaw
+          ? JSON.parse(studyChannelsRaw)
+          : cloudBackup.studyChannels || [],
         ytUsageDate: activeDate,
         ytUsedSeconds: mergedYtUsedSeconds,
+        ytStudyUsedSeconds: mergedYtStudyUsedSeconds,
         emergencyPasses: mergedPasses,
         totalPassesEarned: mergedEarned,
         totalPassesUsed: mergedUsed,
@@ -699,50 +776,43 @@ export async function restoreCloudBackupAfterGoogleLogin(): Promise<void> {
     } = await supabase.auth.getUser();
     if (!user) return;
 
+    // 🌟 100% Account-Wise Isolation: If switching Gmails or logging into a new account, wipe all previous local & native data first!
+    const previousUserId = await AsyncStorage.getItem(ACTIVE_USER_ID_KEY);
+    if (previousUserId !== user.id) {
+      await clearAllLocalAccountData(user.id);
+    }
+
     const backup = user.user_metadata?.jnuits_backup_v2;
 
     if (backup) {
-      const existingContacts = await AsyncStorage.getItem(
-        "@networking_contacts",
-      );
-      if (
-        (!existingContacts || existingContacts === "[]") &&
-        Array.isArray(backup.contacts) &&
-        backup.contacts.length > 0
-      ) {
+      if (Array.isArray(backup.contacts) && backup.contacts.length > 0) {
         await AsyncStorage.setItem(
           "@networking_contacts",
           JSON.stringify(backup.contacts),
         );
       }
 
-      const existingApps = await AsyncStorage.getItem("@focus_allowed_apps");
-      const appsToUse: string[] =
-        existingApps && existingApps !== "[]"
-          ? JSON.parse(existingApps)
-          : Array.isArray(backup.allowedApps)
-            ? backup.allowedApps
-            : [];
+      if (backup.networkingStats) {
+        await AsyncStorage.setItem(
+          "@networking_stats",
+          JSON.stringify(backup.networkingStats),
+        );
+      }
 
-      if (
-        (!existingApps || existingApps === "[]") &&
-        Array.isArray(backup.allowedApps) &&
-        backup.allowedApps.length > 0
-      ) {
+      const appsToUse: string[] = Array.isArray(backup.allowedApps)
+        ? backup.allowedApps
+        : [];
+      if (appsToUse.length > 0) {
         await AsyncStorage.setItem(
           "@focus_allowed_apps",
-          JSON.stringify(backup.allowedApps),
+          JSON.stringify(appsToUse),
         );
         if (Platform.OS === "android" && FocusLock?.saveAllowedApps) {
-          await FocusLock.saveAllowedApps(backup.allowedApps);
+          await FocusLock.saveAllowedApps(appsToUse);
         }
       }
 
-      const existingDomains = await AsyncStorage.getItem(
-        "@focus_allowed_domains",
-      );
       if (
-        (!existingDomains || existingDomains === "[]") &&
         Array.isArray(backup.allowedDomains) &&
         backup.allowedDomains.length > 0
       ) {
@@ -755,26 +825,40 @@ export async function restoreCloudBackupAfterGoogleLogin(): Promise<void> {
         }
       }
 
-      const ytLimit = backup.ytLimitMinutes || 90;
-      if (backup.ytLimitMinutes) {
-        await AsyncStorage.setItem(
-          "@focus_yt_limit_minutes",
-          String(backup.ytLimitMinutes),
-        );
-        if (Platform.OS === "android" && FocusLock?.setYouTubeLimitMinutes) {
-          await FocusLock.setYouTubeLimitMinutes(backup.ytLimitMinutes);
-        }
+      const rawGeneralLim = backup.ytLimitMinutes || 30;
+      const ytLimit = [15, 30, 45].includes(rawGeneralLim) ? rawGeneralLim : 30;
+      await AsyncStorage.setItem("@focus_yt_limit_minutes", String(ytLimit));
+      if (Platform.OS === "android" && FocusLock?.setYouTubeLimitMinutes) {
+        await FocusLock.setYouTubeLimitMinutes(ytLimit);
       }
 
-      // 🌟 Restore saved Schedules from Supabase Cloud & register in Android AlarmManager!
-      const existingSchedules = await AsyncStorage.getItem(
-        "@focus_multi_schedules",
+      const rawStudyLim = backup.ytStudyLimitMinutes || 210;
+      const studyLimit = [90, 150, 210].includes(rawStudyLim)
+        ? rawStudyLim
+        : 210;
+      await AsyncStorage.setItem(
+        "@focus_yt_study_limit_minutes",
+        String(studyLimit),
       );
-      if (
-        (!existingSchedules || existingSchedules === "[]") &&
-        Array.isArray(backup.schedules) &&
-        backup.schedules.length > 0
-      ) {
+
+      const channelsToUse: string[] = Array.isArray(backup.studyChannels)
+        ? backup.studyChannels
+        : [];
+      if (channelsToUse.length > 0) {
+        await AsyncStorage.setItem(
+          "@focus_yt_study_channels",
+          JSON.stringify(channelsToUse),
+        );
+      }
+      if (Platform.OS === "android" && FocusLock?.setStudyYouTubeConfig) {
+        await FocusLock.setStudyYouTubeConfig(
+          studyLimit,
+          channelsToUse,
+          "[]",
+        );
+      }
+
+      if (Array.isArray(backup.schedules) && backup.schedules.length > 0) {
         await AsyncStorage.setItem(
           "@focus_multi_schedules",
           JSON.stringify(backup.schedules),
@@ -816,6 +900,7 @@ export async function restoreCloudBackupAfterGoogleLogin(): Promise<void> {
           backup.totalCompleted ?? 0,
           backup.ytUsageDate || "",
           backup.ytUsedSeconds ?? 0,
+          backup.ytStudyUsedSeconds ?? 0,
         );
       }
     }

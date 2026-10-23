@@ -1,5 +1,6 @@
 const {
   withAndroidManifest,
+  withAndroidStyles,
   withDangerousMod,
   withMainApplication,
 } = require("@expo/config-plugins");
@@ -161,11 +162,39 @@ function withFocusLockManifest(config) {
         mainActivity.$["android:launchMode"] = "singleTask";
         mainActivity.$["android:showWhenLocked"] = "true";
         mainActivity.$["android:turnScreenOn"] = "true";
-        // 🌟 Fix Keyboard hiding input boxes on Android!
         mainActivity.$["android:windowSoftInputMode"] = "adjustResize";
       }
     }
 
+    return config;
+  });
+}
+
+// 🌟 Set Android System Navigation Bar (Recent / Home / Back) background color to #0B1120 (Dark Indigo)
+function withDarkNavigationBarStyle(config) {
+  return withAndroidStyles(config, (config) => {
+    const styles = config.modResults.resources?.style || [];
+    styles.forEach((styleObj) => {
+      if (
+        styleObj.$?.name === "AppTheme" ||
+        styleObj.$?.name === "Theme.App.SplashScreen"
+      ) {
+        styleObj.item = styleObj.item || [];
+        styleObj.item = styleObj.item.filter(
+          (it) =>
+            it.$?.name !== "android:navigationBarColor" &&
+            it.$?.name !== "android:windowLightNavigationBar",
+        );
+        styleObj.item.push({
+          $: { name: "android:navigationBarColor" },
+          _: "#0B1120",
+        });
+        styleObj.item.push({
+          $: { name: "android:windowLightNavigationBar", "tools:targetApi": "27" },
+          _: "false",
+        });
+      }
+    });
     return config;
   });
 }
@@ -265,6 +294,8 @@ function withFocusLockPackageRegistered(config) {
 module.exports = (config) =>
   withFocusLockPackageRegistered(
     withFocusLockNativeFiles(
-      withFocusLockXMLResources(withFocusLockManifest(config)),
+      withFocusLockXMLResources(
+        withDarkNavigationBarStyle(withFocusLockManifest(config)),
+      ),
     ),
   );

@@ -10,6 +10,7 @@ import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
 import android.net.Uri
@@ -20,6 +21,7 @@ import android.provider.Settings
 import android.text.TextUtils
 import android.util.Base64
 import androidx.core.content.FileProvider
+import androidx.core.view.WindowInsetsControllerCompat
 import com.facebook.react.bridge.*
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
@@ -40,13 +42,56 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
         private const val SCHEDULE_BREAK_MILLIS = 10 * 60 * 1000L
         private const val SCHEDULE_CYCLE_MILLIS = SCHEDULE_FOCUS_MILLIS + SCHEDULE_BREAK_MILLIS
 
-        // Max Duration Safety Caps: Session = 6h (360m), Schedule = 10h (600m)
+        // Max Duration Safety Caps: Session = 6h (360m), Schedule = 15h (900m)
         private const val MAX_SESSION_MINUTES = 360
-        private const val MAX_SCHEDULE_MINUTES = 600
+        private const val MAX_SCHEDULE_MINUTES = 900
     }
 
     override fun getName(): String {
         return "FocusLock"
+    }
+
+    // 🌟 Enforces Dark-Indigo (#0B1120) System Navigation Bar (Recent / Home / Back) at runtime
+    private fun applyDarkNavBarInternal() {
+        val activity = reactApplicationContext.currentActivity ?: return
+        activity.runOnUiThread {
+            try {
+                val window = activity.window
+                window.navigationBarColor = Color.parseColor("#0B1120")
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    window.navigationBarDividerColor = Color.parseColor("#1E293B")
+                }
+                val controller = WindowInsetsControllerCompat(window, window.decorView)
+                controller.isAppearanceLightNavigationBars = false
+            } catch (_: Exception) {}
+        }
+    }
+
+    @ReactMethod
+    fun applyDarkNavigationBar(promise: Promise) {
+        applyDarkNavBarInternal()
+        promise.resolve(true)
+    }
+
+    // 🌟 100% Account-Wise Isolation: Clears previous Gmail's native SharedPreferences & alarms on Sign Out or Account Switch!
+    @ReactMethod
+    fun resetLocalAccountData(newUserId: String, promise: Promise) {
+        try {
+            val prefs = reactApplicationContext.getSharedPreferences("FocusModePrefs", Context.MODE_PRIVATE)
+            prefs.edit()
+                .clear()
+                .putString("ACTIVE_USER_ID", newUserId)
+                .putInt("YT_LIMIT_MINUTES", 30)
+                .putInt("YT_STUDY_LIMIT_MINUTES", 210)
+                .putBoolean("POMODORO_ENABLED", true)
+                .putBoolean("SCHEDULE_BREAK_ENABLED", true)
+                .commit()
+
+            FocusScheduler.cancelSessionAlarms(reactApplicationContext)
+            promise.resolve(true)
+        } catch (e: Exception) {
+            promise.reject("RESET_ACCOUNT_ERROR", e.message)
+        }
     }
 
     private fun saveAllowedAppsToPrefs(prefs: android.content.SharedPreferences, pkgSet: Set<String>) {
@@ -291,11 +336,89 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
     @ReactMethod
     fun setYouTubeLimitMinutes(limitMinutes: Int, promise: Promise) {
         try {
+            val safeGeneral = limitMinutes.coerceIn(15, 45)
             val prefs = reactApplicationContext.getSharedPreferences("FocusModePrefs", Context.MODE_PRIVATE)
-            prefs.edit().putInt("YT_LIMIT_MINUTES", limitMinutes).commit()
+            prefs.edit().putInt("YT_LIMIT_MINUTES", safeGeneral).commit()
             promise.resolve(true)
         } catch (e: Exception) {
             promise.reject("ERROR", e.message)
+        }
+    }
+
+    // 🌟 Saves Study YouTube Configuration: Study Time Limit (90m / 150m / 210m), Permanent Study Channels, and Today's Class Videos!
+    @ReactMethod
+    fun setStudyYouTubeConfig(
+        studyLimitMinutes: Int,
+        channels: ReadableArray,
+        videosJson: String,
+        promise: Promise
+    ) {
+        try {
+            val safeStudyLimit = studyLimitMinutes.coerceIn(90, 210)
+            val channelList = ArrayList<String>()
+            for (i in 0 until minOf(channels.size(), 5)) {
+                val ch = channels.getString(i)?.trim()
+                if (!ch.isNullOrEmpty()) channelList.add(ch)
+            }
+            val todayStr = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+            val prefs = reactApplicationContext.getSharedPreferences("FocusModePrefs", Context.MODE_PRIVATE)
+            prefs.edit()
+                .putInt("YT_STUDY_LIMIT_MINUTES", safeStudyLimit)
+                .putString("STUDY_YT_CHANNELS_CSV", channelList.joinToString(","))
+                .putString("STUDY_YT_VIDEOS_JSON", videosJson)
+                .putString("STUDY_YT_VIDEOS_DATE", todayStr)
+                .commit()
+            promise.resolve(true)
+        } catch (e: Exception) {
+            promise.reject("STUDY_YT_CONFIG_ERROR", e.message)
+        }
+    }
+
+    // 🌟 Opens a saved Study Class Video URL or Channel directly in YouTube App from the Lock Screen!
+    @ReactMethod
+    fun openStudyYouTubeItem(urlOrQuery: String, promise: Promise) {
+        try {
+            val clean = urlOrQuery.trim()
+            val ytPkg = "com.google.android.youtube"
+            val prefs = reactApplicationContext.getSharedPreferences("FocusModePrefs", Context.MODE_PRIVATE)
+            val now = System.currentTimeMillis()
+
+            val targetUri = if (clean.startsWith("http://") || clean.startsWith("https://")) {
+                Uri.parse(clean)
+            } else if (clean.contains("youtu.be/") || clean.contains("youtube.com/")) {
+                Uri.parse("https://$clean")
+            } else {
+                Uri.parse("https://www.youtube.com/results?search_query=${Uri.encode(clean)}")
+            }
+
+            // Grant direct Study YouTube launch window (15 mins per direct class video launch)
+            prefs.edit()
+                .putString("LAST_LAUNCHED_ALLOWED_APP", ytPkg)
+                .putLong("WHITELIST_GRACE_UNTIL", now + 1500L)
+                .putLong("LAST_LAUNCHED_STUDY_YT_UNTIL", now + 15 * 60 * 1000L)
+                .commit()
+
+            reactApplicationContext.sendBroadcast(
+                Intent(FocusBlockerService.ACTION_START_YT_TRACKER)
+                    .setPackage(reactApplicationContext.packageName)
+            )
+
+            val intent = Intent(Intent.ACTION_VIEW, targetUri).apply {
+                setPackage(ytPkg)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            try {
+                reactApplicationContext.startActivity(intent)
+            } catch (_: Exception) {
+                val fallback = reactApplicationContext.packageManager.getLaunchIntentForPackage(ytPkg)
+                if (fallback != null) {
+                    fallback.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    reactApplicationContext.startActivity(fallback)
+                }
+            }
+            promise.resolve(true)
+        } catch (e: Exception) {
+            promise.reject("OPEN_STUDY_YT_ERROR", e.message)
         }
     }
 
@@ -310,7 +433,7 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
         }
     }
 
-    // Opens a selected .pdf file directly in News Plus PDF Viewer / Google Drive PDF Viewer without any delayed Home/Recents grace timer!
+    // Opens a selected .pdf file directly in News Plus PDF Viewer / Google Drive PDF Viewer
     @ReactMethod
     fun openPdfUri(uriString: String, promise: Promise) {
         try {
@@ -438,8 +561,8 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
         promise: Promise
     ) {
         try {
-            // Enforce Max 6 Hours (360 minutes) Safety Cap for Session Lock!
             val safeDurationMinutes = durationMinutes.coerceIn(1, MAX_SESSION_MINUTES)
+            val safeGeneralYtLimit = ytLimitMinutes.coerceIn(15, 45)
 
             val pkgSet = HashSet<String>()
             val limit = minOf(allowedPackages.size(), 6)
@@ -459,7 +582,7 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
                 putBoolean("IS_SESSION_ACTIVE", true)
                 putString("LOCK_MODE", "SESSION")
                 putBoolean("POMODORO_ENABLED", pomodoroEnabled)
-                putInt("YT_LIMIT_MINUTES", ytLimitMinutes)
+                putInt("YT_LIMIT_MINUTES", safeGeneralYtLimit)
                 putLong("SESSION_START_TIME", now)
                 putLong("SESSION_START_REALTIME", nowRealtime)
                 putLong("SESSION_END_TIME", sessionEndTime)
@@ -527,7 +650,7 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
                 .putInt("END_HOUR", endHour)
                 .putInt("END_MINUTE", endMinute)
                 .putBoolean("IS_FOCUS_ENABLED", enabled)
-                .putInt("YT_LIMIT_MINUTES", ytLimitMinutes)
+                .putInt("YT_LIMIT_MINUTES", ytLimitMinutes.coerceIn(15, 45))
 
             if (activeDays != null) {
                 val daySet = HashSet<String>()
@@ -567,7 +690,7 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
             prefs.edit()
                 .putString("MULTI_SCHEDULES_JSON", schedulesJson)
                 .putBoolean("SCHEDULE_ENABLED", globalEnabled)
-                .putInt("YT_LIMIT_MINUTES", ytLimitMinutes)
+                .putInt("YT_LIMIT_MINUTES", ytLimitMinutes.coerceIn(15, 45))
                 .commit()
 
             FocusScheduler.scheduleAlarms(reactApplicationContext)
@@ -580,6 +703,7 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
     @ReactMethod
     fun getFocusSessionState(promise: Promise) {
         try {
+            applyDarkNavBarInternal()
             val prefs = reactApplicationContext.getSharedPreferences("FocusModePrefs", Context.MODE_PRIVATE)
             val now = System.currentTimeMillis()
             val active = prefs.getBoolean("IS_SESSION_ACTIVE", false)
@@ -610,7 +734,6 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
                         isBreakActive = false
                         val timeUntilNextBreak = focusMillis - cyclePos
                         if (totalRemainingMillis <= timeUntilNextBreak) {
-                            // The lock will finish before the next break ever starts!
                             cycleRemainingMillis = totalRemainingMillis
                             noMoreBreaks = true
                         } else {
@@ -630,7 +753,6 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
             val streakDays = prefs.getInt("STREAK_DAYS", 0).coerceIn(0, 3)
             val totalCompleted = prefs.getInt("TOTAL_COMPLETED_SESSIONS", 0)
 
-            // Reset daily YT usage if date rolled over
             val todayStr = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
             val savedYtDate = prefs.getString("YT_USAGE_DATE", "") ?: ""
             val ytUsedMillis = if (savedYtDate == todayStr) {
@@ -638,10 +760,34 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
             } else {
                 0L
             }
+            val ytStudyUsedMillis = if (savedYtDate == todayStr) {
+                prefs.getLong("YT_STUDY_USED_MILLIS", 0L)
+            } else {
+                0L
+            }
+
+            // Auto-clear yesterday's class videos at midnight
+            val savedVideosDate = prefs.getString("STUDY_YT_VIDEOS_DATE", "") ?: ""
+            val studyVideosJson = if (savedVideosDate == todayStr) {
+                prefs.getString("STUDY_YT_VIDEOS_JSON", "[]") ?: "[]"
+            } else {
+                if (savedVideosDate.isNotEmpty()) {
+                    prefs.edit()
+                        .putString("STUDY_YT_VIDEOS_JSON", "[]")
+                        .putString("STUDY_YT_VIDEOS_DATE", todayStr)
+                        .apply()
+                }
+                "[]"
+            }
 
             val ytUsedSeconds = (ytUsedMillis / 1000L).toInt()
             val ytUsedMinutes = (ytUsedMillis / 60000L).toInt()
-            val ytLimitMinutes = prefs.getInt("YT_LIMIT_MINUTES", 90)
+            val ytLimitMinutes = prefs.getInt("YT_LIMIT_MINUTES", 30).coerceIn(15, 45)
+
+            val ytStudyUsedSeconds = (ytStudyUsedMillis / 1000L).toInt()
+            val ytStudyLimitMinutes = prefs.getInt("YT_STUDY_LIMIT_MINUTES", 210).coerceIn(90, 210)
+            val studyChannelsCsv = prefs.getString("STUDY_YT_CHANNELS_CSV", "") ?: ""
+
             val lastCompletedDate = prefs.getString("LAST_COMPLETED_DATE", "") ?: ""
             val completedHistoryJson = prefs.getString("COMPLETED_HISTORY_JSON", "{}") ?: "{}"
 
@@ -663,6 +809,10 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
                 putInt("ytUsedSeconds", ytUsedSeconds)
                 putInt("ytUsedMinutes", ytUsedMinutes)
                 putInt("ytLimitMinutes", ytLimitMinutes)
+                putInt("ytStudyUsedSeconds", ytStudyUsedSeconds)
+                putInt("ytStudyLimitMinutes", ytStudyLimitMinutes)
+                putString("studyChannelsCsv", studyChannelsCsv)
+                putString("studyVideosJson", studyVideosJson)
                 putString("ytUsageDate", todayStr)
                 putString("lastCompletedDate", lastCompletedDate)
                 putString("completedHistoryJson", completedHistoryJson)
@@ -724,6 +874,7 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
         cloudTotalCompleted: Int,
         cloudYtUsageDate: String,
         cloudYtUsedSeconds: Int,
+        cloudYtStudyUsedSeconds: Int,
         promise: Promise
     ) {
         try {
@@ -773,15 +924,18 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
                 }
             } catch (_: Exception) {}
 
-            // Merge totalCompleted sessions monotonically (also at least the number of completed history days!)
             val mergedTotalCompleted = maxOf(localCompleted, cloudTotalCompleted, mergedHistory.length())
 
-            // Anti-Cheat Daily YouTube Usage Merge: Restore today's YT used seconds if cloud has higher value for today!
+            // Anti-Cheat Daily YouTube Usage Merge (Both General & Study quotas!)
             val todayStr = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
             val localYtDate = prefs.getString("YT_USAGE_DATE", "") ?: ""
             val localYtMillis = if (localYtDate == todayStr) prefs.getLong("YT_USED_MILLIS", 0L) else 0L
             val cloudYtMillis = if (cloudYtUsageDate == todayStr) (cloudYtUsedSeconds.toLong() * 1000L) else 0L
             val mergedYtMillis = maxOf(localYtMillis, cloudYtMillis)
+
+            val localStudyMillis = if (localYtDate == todayStr) prefs.getLong("YT_STUDY_USED_MILLIS", 0L) else 0L
+            val cloudStudyMillis = if (cloudYtUsageDate == todayStr) (cloudYtStudyUsedSeconds.toLong() * 1000L) else 0L
+            val mergedStudyMillis = maxOf(localStudyMillis, cloudStudyMillis)
 
             prefs.edit()
                 .putInt("TOTAL_PASSES_EARNED", mergedEarned)
@@ -793,6 +947,7 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
                 .putString("COMPLETED_HISTORY_JSON", mergedHistory.toString())
                 .putString("YT_USAGE_DATE", todayStr)
                 .putLong("YT_USED_MILLIS", mergedYtMillis)
+                .putLong("YT_STUDY_USED_MILLIS", mergedStudyMillis)
                 .commit()
 
             promise.resolve(true)

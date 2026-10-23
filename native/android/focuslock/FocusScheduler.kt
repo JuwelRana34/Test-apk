@@ -19,8 +19,8 @@ import java.util.Locale
 object FocusScheduler {
 
     private const val MIN_VALID_LOCK_DURATION_MILLIS = (30 * 60 * 1000L) - 10_000L
-    // Max Schedule Lock Duration = 10 Hours (600 minutes)
-    const val MAX_SCHEDULE_DURATION_MILLIS = 10 * 60 * 60 * 1000L
+    // 🌟 Max Schedule Lock Duration = 15 Hours (900 minutes)
+    const val MAX_SCHEDULE_DURATION_MILLIS = 15 * 60 * 60 * 1000L
 
     @Synchronized
     fun recordSuccessfulLockDay(context: Context, completedDurationMillis: Long) {

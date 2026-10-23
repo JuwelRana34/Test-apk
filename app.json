@@ -2,11 +2,12 @@
   "expo": {
     "name": "Jnuits",
     "slug": "Jnuits",
-    "version": "1.7.0",
+    "version": "1.8.0",
     "orientation": "portrait",
     "icon": "./assets/expo.icon/Assets/Jnulogo.png",
     "scheme": "jnuits",
-    "userInterfaceStyle": "automatic",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#0B1120",
     "ios": {
       "icon": "./assets/expo.icon",
       "bundleIdentifier": "com.juwel522.myapp"
@@ -14,11 +15,15 @@
     "splash": {
       "image": "./assets/expo.icon/Assets/Jnulogo.png",
       "resizeMode": "contain",
-      "backgroundColor": "#0F172A"
+      "backgroundColor": "#0B1120"
+    },
+    "androidNavigationBar": {
+      "backgroundColor": "#0B1120",
+      "barStyle": "light-content"
     },
     "android": {
       "adaptiveIcon": {
-        "backgroundColor": "#0F172A",
+        "backgroundColor": "#0B1120",
         "foregroundImage": "./assets/expo.icon/Assets/Jnulogo.png"
       },
       "softwareKeyboardLayoutMode": "pan",
@@ -46,7 +51,7 @@
       [
         "expo-splash-screen",
         {
-          "backgroundColor": "#0F172A",
+          "backgroundColor": "#0B1120",
           "image": "./assets/expo.icon/Assets/Jnulogo.png",
           "imageWidth": 200
         }

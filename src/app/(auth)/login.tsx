@@ -1,4 +1,4 @@
-import { Ionicons } from "@expo/vector-icons";
+import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { GoogleSignin } from "@react-native-google-signin/google-signin";
 import { useRouter } from "expo-router";
@@ -6,9 +6,10 @@ import { StatusBar } from "expo-status-bar";
 import React, { useEffect, useState } from "react";
 import {
   ActivityIndicator,
-  Alert,
   Image,
   ImageBackground,
+  Modal,
+  Pressable,
   ScrollView,
   Text,
   TouchableOpacity,
@@ -27,6 +28,10 @@ const LOGIN_BG_URI =
 export default function LoginScreen() {
   const router = useRouter();
   const [googleLoading, setGoogleLoading] = useState(false);
+  const [errorModal, setErrorModal] = useState<{
+    visible: boolean;
+    message: string;
+  }>({ visible: false, message: "" });
 
   useEffect(() => {
     GoogleSignin.configure({
@@ -48,7 +53,7 @@ export default function LoginScreen() {
             CACHED_USER_PROFILE_KEY,
             JSON.stringify({
               id: gUser.id || "local-google-user",
-              name: gUser.name || "JnUITS Member",
+              name: gUser.name || "Toki User",
               email: gUser.email || "",
               avatarUrl: gUser.photo || undefined,
               emergencyPasses: 0,
@@ -75,10 +80,12 @@ export default function LoginScreen() {
       if (error?.code === "SIGN_IN_CANCELLED") {
         return;
       }
-      Alert.alert(
-        "Google Login Error",
-        error?.message || "লগইন সম্পন্ন করা যায়নি। ইন্টারনেট সংযোগ চেক করুন।",
-      );
+      setErrorModal({
+        visible: true,
+        message:
+          error?.message ||
+          "লগইন সম্পন্ন করা যায়নি। ইন্টারনেট সংযোগ চেক করুন।",
+      });
     } finally {
       setGoogleLoading(false);
     }
@@ -90,7 +97,7 @@ export default function LoginScreen() {
       className="flex-1 bg-[#070B14]"
       resizeMode="cover"
     >
-      <StatusBar style="light" />
+      <StatusBar style="light" backgroundColor="#070B14" />
       <SafeAreaView
         className="flex-1 bg-[#070B14]/80"
         edges={["top", "bottom", "left", "right"]}
@@ -112,26 +119,30 @@ export default function LoginScreen() {
                 allowFontScaling={false}
                 className="text-indigo-200 font-bold text-xs ml-1.5 tracking-wider uppercase"
               >
-                Productivity & Life OS
+                Deep Focus & Life OS
               </Text>
             </View>
 
             <View className="w-24 h-24 rounded-[32px] bg-indigo-600/25 border-2 border-indigo-400/50 items-center justify-center mb-5 shadow-2xl">
-              <Ionicons name="shield-checkmark" size={50} color="#818CF8" />
+              <MaterialCommunityIcons
+                name="shield-lock"
+                size={52}
+                color="#818CF8"
+              />
             </View>
 
             <Text
               allowFontScaling={false}
               className="text-4xl font-black text-white text-center tracking-tight"
             >
-              JnUITS Super Life
+              Toki
             </Text>
             <Text
               allowFontScaling={false}
               className="text-slate-300 text-xs text-center mt-2.5 px-4 leading-5"
             >
-              আপনার ডিপ ফোকাস, ঘুমের রুটিন এবং প্রিয়জনদের সাথে যোগাযোগের স্মার্ট
-              সঙ্গী
+              আপনার ডিপ ফোকাস, পড়াশোনা, ঘুমের রুটিন এবং প্রিয়জনদের খোঁজ রাখার
+              প্রিমিয়াম সঙ্গী
             </Text>
           </View>
 
@@ -139,27 +150,35 @@ export default function LoginScreen() {
           <View className="bg-slate-900/85 border border-slate-700/80 rounded-[32px] p-5 my-6 gap-y-4">
             <View className="flex-row items-center">
               <View className="w-11 h-11 rounded-2xl bg-rose-500/20 border border-rose-500/30 items-center justify-center mr-3.5">
-                <Ionicons name="lock-closed" size={22} color="#F43F5E" />
+                <MaterialCommunityIcons
+                  name="shield-lock"
+                  size={22}
+                  color="#F43F5E"
+                />
               </View>
               <View className="flex-1">
                 <Text
                   allowFontScaling={false}
                   className="text-white font-bold text-sm"
                 >
-                  25m/5m Focus Lock & Shorts Blocker
+                  Strict Focus Lock & Study YouTube
                 </Text>
                 <Text
                   allowFontScaling={false}
                   className="text-slate-400 text-xs mt-0.5"
                 >
-                  টানা ৩ দিন (৩০+ মি.) লক পূর্ণ করলে +1 Emergency Pass
+                  টানা ৯৯ দিন (৪৫+ মি.) লক পূর্ণ করলে ৭ দিনের Toki Pro ফ্রি!
                 </Text>
               </View>
             </View>
 
             <View className="flex-row items-center">
               <View className="w-11 h-11 rounded-2xl bg-emerald-500/20 border border-emerald-500/30 items-center justify-center mr-3.5">
-                <Ionicons name="people" size={22} color="#34D399" />
+                <MaterialCommunityIcons
+                  name="account-heart"
+                  size={22}
+                  color="#34D399"
+                />
               </View>
               <View className="flex-1">
                 <Text
@@ -172,14 +191,18 @@ export default function LoginScreen() {
                   allowFontScaling={false}
                   className="text-slate-400 text-xs mt-0.5"
                 >
-                  প্রতিদিন সন্ধ্যা ৭টায় এলোমেলো তারিখে নামসহ রিমাইন্ডার
+                  প্রতিদিন সন্ধ্যা ৭টায় র‍্যান্ডম তারিখে নামসহ রিমাইন্ডার
                 </Text>
               </View>
             </View>
 
             <View className="flex-row items-center">
               <View className="w-11 h-11 rounded-2xl bg-violet-500/20 border border-violet-500/30 items-center justify-center mr-3.5">
-                <Ionicons name="alarm" size={22} color="#A78BFA" />
+                <MaterialCommunityIcons
+                  name="alarm-light"
+                  size={22}
+                  color="#A78BFA"
+                />
               </View>
               <View className="flex-1">
                 <Text
@@ -192,7 +215,7 @@ export default function LoginScreen() {
                   allowFontScaling={false}
                   className="text-slate-400 text-xs mt-0.5"
                 >
-                  অংক সমাধান ছাড়া বন্ধ না হওয়া হার্ড অ্যালার্ম ও ক্লাউড ব্যাকআপ
+                  ম্যাথ পাজল ছাড়া বন্ধ না হওয়া হার্ড অ্যালার্ম ও ক্লাউড ব্যাকআপ
                 </Text>
               </View>
             </View>
@@ -232,12 +255,55 @@ export default function LoginScreen() {
                 allowFontScaling={false}
                 className="text-slate-400 text-[11px] text-center ml-1.5"
               >
-                অটো ক্লাউড ব্যাকআপ • একবার লগইন করলে অফলাইনেও সচল থাকবে
+                Account-Wise ক্লাউড ব্যাকআপ • প্রথম ৪০০ ইউজার স্পেশাল অ্যাক্সেস
               </Text>
             </View>
           </View>
         </ScrollView>
       </SafeAreaView>
+
+      {/* Modern Custom Error Modal */}
+      <Modal
+        visible={errorModal.visible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setErrorModal({ visible: false, message: "" })}
+      >
+        <View className="flex-1 bg-black/80 justify-center items-center px-6">
+          <View className="bg-[#131C31] w-full rounded-3xl p-6 border border-rose-500/40 items-center">
+            <View className="w-16 h-16 rounded-2xl bg-rose-500/15 border border-rose-500/40 items-center justify-center mb-4">
+              <MaterialCommunityIcons
+                name="alert-circle-outline"
+                size={34}
+                color="#F43F5E"
+              />
+            </View>
+            <Text
+              allowFontScaling={false}
+              className="text-white font-black text-lg text-center mb-2"
+            >
+              Google Login Error
+            </Text>
+            <Text
+              allowFontScaling={false}
+              className="text-slate-300 text-xs text-center leading-5 mb-5"
+            >
+              {errorModal.message}
+            </Text>
+            <Pressable
+              onPress={() => setErrorModal({ visible: false, message: "" })}
+              className="w-full bg-indigo-600 py-3.5 rounded-2xl items-center"
+            >
+              <Text
+                allowFontScaling={false}
+                className="text-white font-black text-xs uppercase"
+              >
+                ঠিক আছে
+              </Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
     </ImageBackground>
   );
 }

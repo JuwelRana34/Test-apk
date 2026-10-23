@@ -129,7 +129,7 @@ function withFocusLockManifest(config) {
       ],
     });
 
-    // 3. Permissions setup
+    // 3. Permissions setup (including Biometric / Fingerprint for Admin Panel)
     const manifest = config.modResults.manifest;
     manifest["uses-permission"] = manifest["uses-permission"] || [];
     const perms = [
@@ -147,6 +147,8 @@ function withFocusLockManifest(config) {
       "android.permission.SYSTEM_ALERT_WINDOW",
       "android.permission.POST_NOTIFICATIONS",
       "android.permission.VIBRATE",
+      "android.permission.USE_BIOMETRIC",
+      "android.permission.USE_FINGERPRINT",
     ];
     perms.forEach((p) => {
       if (!manifest["uses-permission"].some((u) => u.$["android:name"] === p)) {
@@ -170,7 +172,7 @@ function withFocusLockManifest(config) {
   });
 }
 
-// 🌟 Set Android System Navigation Bar (Recent / Home / Back) background color to #0B1120 (Dark Indigo)
+// Set Android System Navigation Bar (Recent / Home / Back) background color to #0B1120 (Dark Indigo)
 function withDarkNavigationBarStyle(config) {
   return withAndroidStyles(config, (config) => {
     const styles = config.modResults.resources?.style || [];
@@ -190,7 +192,10 @@ function withDarkNavigationBarStyle(config) {
           _: "#0B1120",
         });
         styleObj.item.push({
-          $: { name: "android:windowLightNavigationBar", "tools:targetApi": "27" },
+          $: {
+            name: "android:windowLightNavigationBar",
+            "tools:targetApi": "27",
+          },
           _: "false",
         });
       }

@@ -132,6 +132,12 @@ class FocusBlockerService : AccessibilityService() {
         }
     }
 
+    private fun isProActive(prefs: android.content.SharedPreferences): Boolean {
+        val proFlag = prefs.getBoolean("IS_PRO_USER", false)
+        val expiresAt = prefs.getLong("PRO_EXPIRES_AT", 0L)
+        return proFlag && expiresAt > System.currentTimeMillis()
+    }
+
     // Discovers News Plus & Drive PDF Viewer packages on Realme/Android
     private fun getPdfReaderPackages(): Set<String> {
         cachedNewsPlusPackages?.let { if (it.isNotEmpty()) return it }
@@ -173,28 +179,33 @@ class FocusBlockerService : AccessibilityService() {
     }
 
     private fun getAllowedAppsSet(prefs: android.content.SharedPreferences): Set<String> {
-        val result = HashSet<String>()
+        val maxApps = if (isProActive(prefs)) 6 else 2
+        val result = LinkedHashSet<String>()
         val csv = prefs.getString("ALLOWED_APPS_CSV", "") ?: ""
         if (csv.isNotEmpty()) {
             csv.split(",").forEach { item ->
                 val clean = item.trim()
-                if (clean.isNotEmpty()) result.add(clean)
+                if (clean.isNotEmpty() && result.size < maxApps) result.add(clean)
             }
         }
         val setVal = prefs.getStringSet("ALLOWED_APPS", null)
         if (setVal != null) {
-            result.addAll(setVal)
+            for (pkg in setVal) {
+                if (result.size >= maxApps) break
+                result.add(pkg)
+            }
         }
         return result
     }
 
     private fun getAllowedDomainsSet(prefs: android.content.SharedPreferences): Set<String> {
+        val maxSites = if (isProActive(prefs)) 5 else 2
         val result = LinkedHashSet<String>()
         val csv = prefs.getString("ALLOWED_DOMAINS_CSV", "") ?: ""
         if (csv.isNotEmpty()) {
             csv.split(",").forEach { item ->
                 val clean = item.trim().lowercase()
-                if (clean.isNotEmpty() && !clean.contains("youtube.") && !clean.contains("youtu.be")) {
+                if (clean.isNotEmpty() && !clean.contains("youtube.") && !clean.contains("youtu.be") && result.size < maxSites) {
                     result.add(clean)
                 }
             }
@@ -203,7 +214,7 @@ class FocusBlockerService : AccessibilityService() {
         if (setVal != null) {
             setVal.forEach { d ->
                 val clean = d.trim().lowercase()
-                if (clean.isNotEmpty() && !clean.contains("youtube.") && !clean.contains("youtu.be")) {
+                if (clean.isNotEmpty() && !clean.contains("youtube.") && !clean.contains("youtu.be") && result.size < maxSites) {
                     result.add(clean)
                 }
             }
@@ -211,8 +222,9 @@ class FocusBlockerService : AccessibilityService() {
         return result
     }
 
-    // 🌟 Extracts user's whitelisted Study Channels + Today's Study Video keywords/titles
+    // Extracts user's whitelisted Study Channels + Today's Study Video keywords/titles (Only for Toki Pro!)
     private fun getStudyKeywordsList(prefs: android.content.SharedPreferences): List<String> {
+        if (!isProActive(prefs)) return emptyList()
         val list = ArrayList<String>()
         val channelsCsv = prefs.getString("STUDY_YT_CHANNELS_CSV", "") ?: ""
         if (channelsCsv.isNotEmpty()) {
@@ -244,13 +256,12 @@ class FocusBlockerService : AccessibilityService() {
         return list
     }
 
-    // Checks if current YouTube screen matches a saved Study Channel or Today's Class Video!
     private fun isWatchingStudyChannelOrVideo(
         rootNode: AccessibilityNodeInfo?,
         prefs: android.content.SharedPreferences
     ): Boolean {
+        if (!isProActive(prefs)) return false
         val now = System.currentTimeMillis()
-        // If user launched a saved Study Class Video directly from Lock Screen within the last 3 minutes and is still in YouTube player
         val studyLaunchUntil = prefs.getLong("LAST_LAUNCHED_STUDY_YT_UNTIL", 0L)
         if (now < studyLaunchUntil) {
             return true
@@ -487,9 +498,6 @@ class FocusBlockerService : AccessibilityService() {
         anchorOverlayView = null
     }
 
-    // Unified Cycle Timing:
-    // SESSION Lock -> 25m Focus + 5m Break (30m cycle)
-    // SCHEDULE Lock -> 50m Focus + 10m Break (60m cycle)
     private fun getActiveCycleParameters(prefs: android.content.SharedPreferences): Pair<Long, Long>? {
         val lockMode = prefs.getString("LOCK_MODE", "SESSION") ?: "SESSION"
         return if (lockMode == "SESSION") {
@@ -575,8 +583,6 @@ class FocusBlockerService : AccessibilityService() {
         })
     }
 
-    // PDF-Only Guard for News Plus & Google Drive PDF Viewer:
-    // Allows reading .pdf files, but blocks video players or non-PDF feeds inside News Plus!
     private fun containsVideoOrDisallowedFeedInPdfReader(
         node: AccessibilityNodeInfo?,
         className: String
@@ -638,7 +644,7 @@ class FocusBlockerService : AccessibilityService() {
         val eventClassName = event.className?.toString() ?: ""
         val lowerClass = eventClassName.lowercase()
 
-        // 0.01s Instant Pull-Back on Recents / Overview Button Press (Even from Allowed Apps or PDF Readers!)
+        // 0.01s Instant Pull-Back on Recents / Overview Button Press
         if (eventPackageName == "com.android.systemui") {
             val isRecentsOpened = eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
                 (lowerClass.contains("recents") ||
@@ -679,7 +685,6 @@ class FocusBlockerService : AccessibilityService() {
 
         val lowerPkg = packageName.lowercase()
 
-        // Allow Android & Realme "Open with..." Chooser / Intent Resolver & File Picker so PDF opening works seamlessly!
         if (lowerPkg.contains("inputmethod") ||
             lowerPkg.contains("keyboard") ||
             lowerPkg.contains("honeyboard") ||
@@ -720,7 +725,6 @@ class FocusBlockerService : AccessibilityService() {
             }
         }
 
-        // During Break Phase: allow normal apps (except Shorts/Reels handled above & Settings tampering)
         if (inBreak) {
             stopYouTubeTracker()
             if (packageName == "com.android.settings" && rootNode != null && isTamperingWithSettings(rootNode)) {
@@ -730,27 +734,30 @@ class FocusBlockerService : AccessibilityService() {
             return
         }
 
-        // Default PDF Readers (News Plus PDF Viewer + Google Drive PDF Viewer + any PDF Viewer activity) with PDF-Only Guard!
-        val pdfReaders = getPdfReaderPackages()
-        val isPdfReaderActive = pdfReaders.contains(packageName) ||
-            (rootPackageName != null && pdfReaders.contains(rootPackageName) && !isHomeLauncherPackage(packageName)) ||
-            lowerClass.contains("pdf") ||
-            lowerPkg.contains("pdf")
+        // Default PDF Readers (Only for Toki Pro!)
+        if (isProActive(prefs)) {
+            val pdfReaders = getPdfReaderPackages()
+            val isPdfReaderActive = pdfReaders.contains(packageName) ||
+                (rootPackageName != null && pdfReaders.contains(rootPackageName) && !isHomeLauncherPackage(packageName)) ||
+                lowerClass.contains("pdf") ||
+                lowerPkg.contains("pdf")
 
-        if (isPdfReaderActive) {
-            stopYouTubeTracker()
-            prefs.edit().putLong("WHITELIST_GRACE_UNTIL", 0L).apply()
-            if (containsVideoOrDisallowedFeedInPdfReader(rootNode, eventClassName)) {
-                stopAllBackgroundMediaAndPiP()
-                performGlobalAction(GLOBAL_ACTION_BACK)
-                showInstantAlert("🚫 শুধুমাত্র PDF পড়া যাবে, ভিডিও দেখা নিষিদ্ধ!")
-                redirectToMainActivity(force = true)
+            if (isPdfReaderActive) {
+                stopYouTubeTracker()
+                prefs.edit().putLong("WHITELIST_GRACE_UNTIL", 0L).apply()
+                if (containsVideoOrDisallowedFeedInPdfReader(rootNode, eventClassName)) {
+                    stopAllBackgroundMediaAndPiP()
+                    performGlobalAction(GLOBAL_ACTION_BACK)
+                    showInstantAlert("🚫 শুধুমাত্র PDF পড়া যাবে, ভিডিও দেখা নিষিদ্ধ!")
+                    redirectToMainActivity(force = true)
+                }
+                return
             }
-            return
         }
 
-        // 🌟 WHITELISTED APPS & STUDY YOUTUBE HANDLING
-        val isStudyYtLaunchActive = (packageName == "com.google.android.youtube" || rootPackageName == "com.google.android.youtube") &&
+        // WHITELISTED APPS & STUDY YOUTUBE HANDLING
+        val isStudyYtLaunchActive = isProActive(prefs) &&
+            (packageName == "com.google.android.youtube" || rootPackageName == "com.google.android.youtube") &&
             (now < prefs.getLong("LAST_LAUNCHED_STUDY_YT_UNTIL", 0L) || getStudyKeywordsList(prefs).isNotEmpty())
 
         val isAllowedApp = allowedApps.contains(packageName) ||
@@ -766,7 +773,6 @@ class FocusBlockerService : AccessibilityService() {
                 rootPackageName ?: packageName
             }
 
-            // Clear launch grace as soon as the allowed app is in foreground so Home/Recents pulls back in 0.01s!
             if (prefs.getLong("WHITELIST_GRACE_UNTIL", 0L) > 0L) {
                 prefs.edit().putLong("WHITELIST_GRACE_UNTIL", 0L).apply()
             }
@@ -851,7 +857,6 @@ class FocusBlockerService : AccessibilityService() {
             performGlobalAction(GLOBAL_ACTION_BACK)
         }
 
-        // Force 0.01s instant pull-back without 250ms throttle!
         redirectToMainActivity(force = true)
     }
 
@@ -909,7 +914,7 @@ class FocusBlockerService : AccessibilityService() {
 
         if (!isAllowed) {
             redirectChromeToSafeSite(packageName, allowedDomains)
-            showInstantAlert("🚫 শুধু আপনার সিলেক্ট করা ৫টি ওয়েবসাইট চালানো যাবে!")
+            showInstantAlert("🚫 শুধু আপনার অনুমোদিত ওয়েবসাইট চালানো যাবে!")
         }
     }
 
@@ -928,8 +933,10 @@ class FocusBlockerService : AccessibilityService() {
     }
 
     private fun isTamperingWithSettings(rootNode: AccessibilityNodeInfo): Boolean {
-        val textMatches = rootNode.findAccessibilityNodeInfosByText("Jnuits")
-        if (!textMatches.isNullOrEmpty()) return true
+        val tokiMatches = rootNode.findAccessibilityNodeInfosByText("Toki")
+        if (!tokiMatches.isNullOrEmpty()) return true
+        val jnuitsMatches = rootNode.findAccessibilityNodeInfosByText("Jnuits")
+        if (!jnuitsMatches.isNullOrEmpty()) return true
         return false
     }
 
@@ -972,7 +979,6 @@ class FocusBlockerService : AccessibilityService() {
                 .putLong("YT_USED_MILLIS", 0L)
                 .putLong("YT_STUDY_USED_MILLIS", 0L)
 
-            // Auto-clear yesterday's class videos at midnight while keeping permanent study channels intact!
             val videosDate = prefs.getString("STUDY_YT_VIDEOS_DATE", "") ?: ""
             if (videosDate.isNotEmpty() && videosDate != todayStr) {
                 editor.putString("STUDY_YT_VIDEOS_JSON", "[]")
@@ -1138,7 +1144,7 @@ class FocusBlockerService : AccessibilityService() {
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             getSystemService(NotificationManager::class.java).createNotificationChannel(
-                NotificationChannel(CHANNEL_ID, "Focus Mode", NotificationManager.IMPORTANCE_LOW),
+                NotificationChannel(CHANNEL_ID, "Toki Focus Mode", NotificationManager.IMPORTANCE_LOW),
             )
         }
     }
@@ -1162,9 +1168,9 @@ class FocusBlockerService : AccessibilityService() {
 
         if (isActive && endTime > System.currentTimeMillis()) {
             val modeTitle = if (lockMode == "SCHEDULE") {
-                "Schedule Lock (50m/10m) Active"
+                "Toki Schedule Lock (50m/10m)"
             } else {
-                "Session Lock (25m/5m) Active"
+                "Toki Session Lock (25m/5m)"
             }
             builder.setContentTitle(modeTitle)
             builder.setContentText("Only whitelisted apps, sites & study classes allowed.")
@@ -1175,7 +1181,7 @@ class FocusBlockerService : AccessibilityService() {
                 builder.setWhen(endTime)
             }
         } else {
-            builder.setContentTitle("Focus Mode")
+            builder.setContentTitle("Toki Focus Mode")
             builder.setContentText("Ready for your next deep work session.")
             builder.setUsesChronometer(false)
         }

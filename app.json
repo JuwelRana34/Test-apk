@@ -1,11 +1,11 @@
 {
   "expo": {
-    "name": "Jnuits",
-    "slug": "Jnuits",
-    "version": "1.8.0",
+    "name": "Toki",
+    "slug": "Toki",
+    "version": "2.0.0",
     "orientation": "portrait",
     "icon": "./assets/expo.icon/Assets/Jnulogo.png",
-    "scheme": "jnuits",
+    "scheme": "toki",
     "userInterfaceStyle": "dark",
     "backgroundColor": "#0B1120",
     "ios": {
@@ -39,7 +39,9 @@
         "android.permission.POST_NOTIFICATIONS",
         "android.permission.RECEIVE_BOOT_COMPLETED",
         "android.permission.READ_CONTACTS",
-        "android.permission.VIBRATE"
+        "android.permission.VIBRATE",
+        "android.permission.USE_BIOMETRIC",
+        "android.permission.USE_FINGERPRINT"
       ]
     },
     "web": {
@@ -68,7 +70,9 @@
         "expo-build-properties",
         {
           "android": {
-            "enableSeparateBuildPerCPUArchitecture": true
+            "enableSeparateBuildPerCPUArchitecture": true,
+            "enableProguardInReleaseBuilds": true,
+            "enableShrinkResourcesInReleaseBuilds": true
           }
         }
       ],

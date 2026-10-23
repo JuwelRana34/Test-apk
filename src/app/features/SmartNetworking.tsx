@@ -1,5 +1,6 @@
 import { Feather, Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { useRouter } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import React, {
   useCallback,
@@ -30,6 +31,8 @@ import {
   useSafeAreaInsets,
 } from "react-native-safe-area-context";
 import {
+  CACHED_USER_PROFILE_KEY,
+  CachedUserProfile,
   ContactForNotification,
   registerExpoPushTokenOnlineOffline,
   scheduleContactNotificationsOffline,
@@ -39,7 +42,8 @@ import {
 
 const STORAGE_KEY = "@networking_contacts";
 const STATS_KEY = "@networking_stats";
-const { FastContacts } = NativeModules;
+const FREE_MAX_CONTACTS = 5;
+const { FastContacts, FocusLock } = NativeModules;
 
 export type ContactCategoryType = "family" | "friends" | "network";
 type InteractionType = "call" | "whatsapp" | "sms" | "done";
@@ -188,12 +192,14 @@ const calculateRandomUniqueDueDate = (
 };
 
 export default function SmartNetworkingScreen() {
+  const router = useRouter();
   const insets = useSafeAreaInsets();
 
   const [contacts, setContacts] = useState<RelationshipContact[]>([]);
   const [todayDueContacts, setTodayDueContacts] = useState<
     RelationshipContact[]
   >([]);
+  const [isProUser, setIsProUser] = useState(false);
   const [activeTab, setActiveTab] = useState<
     "today" | "family" | "friends" | "network"
   >("today");
@@ -208,7 +214,7 @@ export default function SmartNetworkingScreen() {
   const [customNoteInput, setCustomNoteInput] = useState("");
   const [keyboardHeight, setKeyboardHeight] = useState(0);
 
-  // Modern Custom Modal State (Replaces all default Alert.alert!)
+  // Modern Custom Modal State
   const [uiModal, setUiModal] = useState<{
     visible: boolean;
     title: string;
@@ -249,10 +255,24 @@ export default function SmartNetworkingScreen() {
 
   const loadContactsAndScheduleNotifications = useCallback(async () => {
     try {
-      const [rawContacts, rawStats] = await Promise.all([
+      const [rawContacts, rawStats, cachedProfileRaw] = await Promise.all([
         AsyncStorage.getItem(STORAGE_KEY),
         AsyncStorage.getItem(STATS_KEY),
+        AsyncStorage.getItem(CACHED_USER_PROFILE_KEY),
       ]);
+
+      let pro = false;
+      if (cachedProfileRaw) {
+        const parsedProfile: CachedUserProfile = JSON.parse(cachedProfileRaw);
+        pro = !!parsedProfile.isPro;
+      }
+      if (Platform.OS === "android" && FocusLock?.getFocusSessionState) {
+        try {
+          const s = await FocusLock.getFocusSessionState();
+          pro = !!(pro || s.isPro);
+        } catch {}
+      }
+      setIsProUser(pro);
 
       if (rawStats) {
         setAppStats(JSON.parse(rawStats));
@@ -401,6 +421,21 @@ export default function SmartNetworkingScreen() {
   };
 
   const openContactPicker = async () => {
+    // Free vs Toki Pro Contact Cap: Free = 5 Contacts, Pro = Unlimited!
+    if (!isProUser && contacts.length >= FREE_MAX_CONTACTS) {
+      setUiModal({
+        visible: true,
+        title: "Free ভার্সনে সর্বোচ্চ ৫টি কন্টাক্ট 👑",
+        message:
+          "Free ভার্সনে সর্বোচ্চ ৫ জন প্রিয় মানুষের রিমাইন্ডার সেট করা যায়। আনলিমিটেড কন্টাক্ট যুক্ত করতে Toki Pro-তে আপগ্রেড করুন!",
+        icon: "crown",
+        color: "#FBBF24",
+        confirmText: "Upgrade to Pro",
+        onConfirm: () => router.push("/(tabs)/profile"),
+      });
+      return;
+    }
+
     setPickerModalVisible(true);
     setIsLoadingContacts(true);
 
@@ -433,6 +468,22 @@ export default function SmartNetworkingScreen() {
 
   const addContactWithCategory = async (category: ContactCategoryType) => {
     if (!selectedContactToAdd) return;
+    if (!isProUser && contacts.length >= FREE_MAX_CONTACTS) {
+      setSelectedContactToAdd(null);
+      setPickerModalVisible(false);
+      setUiModal({
+        visible: true,
+        title: "Free ভার্সনে সর্বোচ্চ ৫টি কন্টাক্ট 👑",
+        message:
+          "আনলিমিটেড কন্টাক্ট রিমাইন্ডার সেট করতে Toki Pro-তে আপগ্রেড করুন!",
+        icon: "crown",
+        color: "#FBBF24",
+        confirmText: "Upgrade to Pro",
+        onConfirm: () => router.push("/(tabs)/profile"),
+      });
+      return;
+    }
+
     const phone = selectedContactToAdd.phoneNumbers?.[0]?.number || "";
     if (!phone) {
       setUiModal({
@@ -551,13 +602,25 @@ export default function SmartNetworkingScreen() {
       <View className="px-4 pt-3 pb-1">
         <View className="flex-row justify-between items-center mb-1">
           <View className="flex-1 pr-2">
-            <Text
-              allowFontScaling={false}
-              numberOfLines={1}
-              className="text-xl font-black text-white tracking-tight"
-            >
-              Contact Reminder CRM
-            </Text>
+            <View className="flex-row items-center">
+              <Text
+                allowFontScaling={false}
+                numberOfLines={1}
+                className="text-xl font-black text-white tracking-tight"
+              >
+                Toki Contact CRM
+              </Text>
+              <View className="ml-2 px-2 py-0.5 rounded-full bg-slate-800 border border-slate-700">
+                <Text
+                  allowFontScaling={false}
+                  className="text-indigo-300 font-bold text-[10px]"
+                >
+                  {isProUser
+                    ? `${contacts.length} Saved (Pro)`
+                    : `${contacts.length}/${FREE_MAX_CONTACTS} Free`}
+                </Text>
+              </View>
+            </View>
             <Text
               allowFontScaling={false}
               numberOfLines={1}
@@ -983,7 +1046,7 @@ export default function SmartNetworkingScreen() {
         </KeyboardAvoidingView>
       </Modal>
 
-      {/* MODERN CUSTOM MODAL (Replaces all default Alert.alert!) */}
+      {/* MODERN CUSTOM MODAL */}
       <Modal
         visible={uiModal.visible}
         transparent

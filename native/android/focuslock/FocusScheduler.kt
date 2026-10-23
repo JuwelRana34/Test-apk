@@ -18,9 +18,12 @@ import java.util.Locale
 
 object FocusScheduler {
 
-    private const val MIN_VALID_LOCK_DURATION_MILLIS = (30 * 60 * 1000L) - 10_000L
-    // 🌟 Max Schedule Lock Duration = 15 Hours (900 minutes)
+    // 🌟 Minimum 45 minutes daily lock required to earn +1 Streak Day toward the 99-Day Free Pro Reward!
+    private const val MIN_VALID_LOCK_DURATION_MILLIS = (45 * 60 * 1000L) - 10_000L
+    // Max Schedule Lock Duration = 15 Hours (900 minutes)
     const val MAX_SCHEDULE_DURATION_MILLIS = 15 * 60 * 60 * 1000L
+    const val STREAK_TARGET_DAYS = 99
+    private const val REWARD_PRO_DAYS_MILLIS = 7L * 24L * 60L * 60L * 1000L
 
     @Synchronized
     fun recordSuccessfulLockDay(context: Context, completedDurationMillis: Long) {
@@ -44,22 +47,10 @@ object FocusScheduler {
             return
         }
 
-        if (completedDurationMillis < MIN_VALID_LOCK_DURATION_MILLIS) {
-            mainHandler.post {
-                Toast.makeText(
-                    context.applicationContext,
-                    "ℹ️ লক শেষ হয়েছে! (১ স্ট্রিক পেতে কমপক্ষে ৩০ মিনিটের লক পূর্ণ করতে হবে)",
-                    Toast.LENGTH_LONG
-                ).show()
-            }
-            return
-        }
-
         val todayStr = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
-        val lastDate = prefs.getString("LAST_COMPLETED_DATE", "") ?: ""
 
-        // Record daily focus minutes into COMPLETED_HISTORY_JSON for the 60-Day GitHub Heatmap Grid!
-        val completedMins = (completedDurationMillis / 60000L).toInt().coerceAtLeast(30)
+        // Always record completed focus minutes (>= 15m) into COMPLETED_HISTORY_JSON for the 60-Day GitHub Heatmap Grid!
+        val completedMins = (completedDurationMillis / 60000L).toInt().coerceAtLeast(1)
         val historyStr = prefs.getString("COMPLETED_HISTORY_JSON", "{}") ?: "{}"
         val historyObj = try {
             JSONObject(historyStr)
@@ -67,7 +58,24 @@ object FocusScheduler {
             JSONObject()
         }
         val prevMinsToday = historyObj.optInt(todayStr, 0)
-        historyObj.put(todayStr, prevMinsToday + completedMins)
+        val updatedTodayMins = prevMinsToday + completedMins
+        historyObj.put(todayStr, updatedTodayMins)
+
+        if (completedDurationMillis < MIN_VALID_LOCK_DURATION_MILLIS) {
+            prefs.edit()
+                .putString("COMPLETED_HISTORY_JSON", historyObj.toString())
+                .commit()
+            mainHandler.post {
+                Toast.makeText(
+                    context.applicationContext,
+                    "ℹ️ লক শেষ হয়েছে! (৯৯ দিনের স্ট্রিক পেতে কমপক্ষে ৪৫ মিনিটের লক পূর্ণ করতে হবে)",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+            return
+        }
+
+        val lastDate = prefs.getString("LAST_COMPLETED_DATE", "") ?: ""
 
         if (lastDate.isNotEmpty() && todayStr <= lastDate) {
             prefs.edit()
@@ -76,7 +84,7 @@ object FocusScheduler {
             mainHandler.post {
                 Toast.makeText(
                     context.applicationContext,
-                    "🎉 লক সম্পন্ন! (আজকের ১ স্ট্রিক আগেই যোগ হয়েছে)",
+                    "🎉 ৪৫+ মিনিট লক সম্পন্ন! (আজকের ১ স্ট্রিক আগেই যোগ হয়েছে)",
                     Toast.LENGTH_SHORT
                 ).show()
             }
@@ -93,43 +101,42 @@ object FocusScheduler {
             1
         }
 
-        var totalEarned = prefs.getInt("TOTAL_PASSES_EARNED", prefs.getInt("EMERGENCY_PASSES", 0))
-        val totalUsed = prefs.getInt("TOTAL_PASSES_USED", 0)
-        var currentPasses = (totalEarned - totalUsed).coerceIn(0, 5)
-        var earnedNewPass = false
+        var unlockedSevenDayPro = false
+        val editor = prefs.edit()
 
-        if (currentStreak >= 3) {
-            if (currentPasses < 5) {
-                totalEarned += 1
-                currentPasses = (totalEarned - totalUsed).coerceIn(0, 5)
-                earnedNewPass = true
-            }
+        // 🌟 99-Day Consecutive Streak Reward: Unlock 7 Days of Free Toki Pro! (Passes are never given free via streak)
+        if (currentStreak >= STREAK_TARGET_DAYS) {
+            val now = System.currentTimeMillis()
+            val currentProExpiry = prefs.getLong("PRO_EXPIRES_AT", 0L)
+            val baseTime = maxOf(now, currentProExpiry)
+            val newExpiry = baseTime + REWARD_PRO_DAYS_MILLIS
+
+            editor.putBoolean("IS_PRO_USER", true)
+            editor.putLong("PRO_EXPIRES_AT", newExpiry)
+            editor.putString("PRO_PLAN_NAME", "99-Day Streak Reward (7 Days Free Pro)")
             currentStreak = 0
+            unlockedSevenDayPro = true
         }
 
-        prefs.edit()
+        editor
             .putInt("TOTAL_COMPLETED_SESSIONS", totalCompleted)
             .putInt("STREAK_DAYS", currentStreak)
-            .putInt("TOTAL_PASSES_EARNED", totalEarned)
-            .putInt("TOTAL_PASSES_USED", totalUsed)
-            .putInt("EMERGENCY_PASSES", currentPasses)
             .putString("LAST_COMPLETED_DATE", todayStr)
             .putString("COMPLETED_HISTORY_JSON", historyObj.toString())
             .commit()
 
-        val finalPassCount = currentPasses
         val finalStreakCount = currentStreak
         mainHandler.post {
-            if (earnedNewPass) {
+            if (unlockedSevenDayPro) {
                 Toast.makeText(
                     context.applicationContext,
-                    "অভিনন্দন! টানা ৩ দিন লক পূর্ণ করায় +1 Emergency Pass পেয়েছেন! (মোট: $finalPassCount/5)",
+                    "👑 অভিনন্দন! টানা ৯৯ দিন লক পূর্ণ করায় আপনি ৭ দিনের Toki Pro ফ্রিতে পেয়েছেন!",
                     Toast.LENGTH_LONG
                 ).show()
             } else {
                 Toast.makeText(
                     context.applicationContext,
-                    "আজকের স্ট্রিক সম্পন্ন! ($finalStreakCount/3 দিন)",
+                    "🔥 আজকের স্ট্রিক সম্পন্ন! ($finalStreakCount/99 দিন • ৯৯ দিনে ৭ দিন ফ্রি Pro)",
                     Toast.LENGTH_LONG
                 ).show()
             }

@@ -21,6 +21,224 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
 const { FocusLock } = NativeModules;
 
 // ============================================================================
+// TOKI v2.0.0 — PRO, ADMIN, OTA UPDATE, EXAM COUNTDOWN & 60-DAY HISTORY ENGINE
+// ============================================================================
+
+export const CURRENT_APP_VERSION = "2.0.0";
+export const SUPER_ADMIN_EMAIL = "juwelrana3426@gmail.com";
+export const ADMIN_APP_CONFIG_KEY = "@toki_admin_app_config_v2";
+export const USER_PURCHASE_HISTORY_KEY = "@toki_user_purchase_history_v2";
+export const EXAM_COUNTDOWN_GOAL_KEY = "@toki_exam_countdown_goal_v2";
+const SIXTY_DAYS_MS = 60 * 24 * 60 * 60 * 1000;
+
+export interface ExamCountdownGoal {
+  title: string;
+  targetDate: string; // YYYY-MM-DD
+}
+
+export interface PurchaseRecord {
+  id: string;
+  userEmail: string;
+  accountCode: string;
+  planType: "PRO30" | "PRO180" | "PRO365" | "PASS1" | "PASS3";
+  planTitle: string;
+  amountBdt: number;
+  trxId: string;
+  senderPhone: string;
+  status: "pending" | "approved";
+  activationKey?: string;
+  createdAt: number;
+  expiresAt: number;
+}
+
+export interface AdminAppConfig {
+  whatsappNumber: string;
+  bkashNagadNumber: string;
+  adminEmails: string[];
+  maxEarlyUsersCap: number;
+  prices: {
+    pro30: number;
+    pro180: number;
+    pro365: number;
+    pass1: number;
+    pass3: number;
+  };
+  appUpdate: {
+    latestVersion: string;
+    downloadUrl: string;
+    releaseNotes: string;
+    forceUpdate: boolean;
+  };
+  salesHistory?: PurchaseRecord[];
+}
+
+export const DEFAULT_ADMIN_CONFIG: AdminAppConfig = {
+  whatsappNumber: "01761632836",
+  bkashNagadNumber: "01761632836",
+  adminEmails: [SUPER_ADMIN_EMAIL],
+  maxEarlyUsersCap: 400,
+  prices: {
+    pro30: 49,
+    pro180: 199,
+    pro365: 349,
+    pass1: 19,
+    pass3: 49,
+  },
+  appUpdate: {
+    latestVersion: CURRENT_APP_VERSION,
+    downloadUrl: "",
+    releaseNotes: "Toki Pro 👑, ৯৯ দিনের স্ট্রিক চ্যালেঞ্জ এবং স্মার্ট ফোকাস রিপোর্ট যুক্ত হয়েছে!",
+    forceUpdate: false,
+  },
+  salesHistory: [],
+};
+
+export function getAccountCodeForUser(userIdOrEmail: string): string {
+  const raw = (userIdOrEmail || "toki-user").trim().toLowerCase();
+  let h1 = 0xdeadbeef ^ raw.length;
+  let h2 = 0x41c6ce57 ^ raw.length;
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  const hex = (h1 >>> 0).toString(16).toUpperCase().padStart(8, "0");
+  return `TK-${hex}`;
+}
+
+export function isUserAdmin(email?: string | null, cfg?: AdminAppConfig | null): boolean {
+  if (!email) return false;
+  const clean = email.trim().toLowerCase();
+  if (clean === SUPER_ADMIN_EMAIL.toLowerCase()) return true;
+  if (cfg?.adminEmails && Array.isArray(cfg.adminEmails)) {
+    return cfg.adminEmails.some((e) => e.trim().toLowerCase() === clean);
+  }
+  return false;
+}
+
+export function isVersionNewer(currentVer: string, latestVer: string): boolean {
+  if (!latestVer) return false;
+  const cParts = currentVer.split(".").map((n) => parseInt(n, 10) || 0);
+  const lParts = latestVer.split(".").map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(cParts.length, lParts.length); i++) {
+    const c = cParts[i] || 0;
+    const l = lParts[i] || 0;
+    if (l > c) return true;
+    if (l < c) return false;
+  }
+  return false;
+}
+
+export async function getExamCountdownGoal(): Promise<ExamCountdownGoal | null> {
+  try {
+    const raw = await AsyncStorage.getItem(EXAM_COUNTDOWN_GOAL_KEY);
+    if (raw) return JSON.parse(raw) as ExamCountdownGoal;
+  } catch {}
+  return null;
+}
+
+export async function saveExamCountdownGoal(goal: ExamCountdownGoal): Promise<void> {
+  try {
+    await AsyncStorage.setItem(EXAM_COUNTDOWN_GOAL_KEY, JSON.stringify(goal));
+  } catch {}
+}
+
+export async function getAdminAppConfig(): Promise<AdminAppConfig> {
+  let localCfg: AdminAppConfig = { ...DEFAULT_ADMIN_CONFIG };
+  try {
+    const raw = await AsyncStorage.getItem(ADMIN_APP_CONFIG_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      localCfg = {
+        ...DEFAULT_ADMIN_CONFIG,
+        ...parsed,
+        prices: { ...DEFAULT_ADMIN_CONFIG.prices, ...(parsed.prices || {}) },
+        appUpdate: { ...DEFAULT_ADMIN_CONFIG.appUpdate, ...(parsed.appUpdate || {}) },
+      };
+    }
+  } catch {}
+
+  try {
+    const { data } = await supabase.auth.getUser();
+    const cloudCfg = data?.user?.user_metadata?.toki_admin_config_v2;
+    if (cloudCfg && typeof cloudCfg === "object") {
+      localCfg = {
+        ...localCfg,
+        ...cloudCfg,
+        prices: { ...localCfg.prices, ...(cloudCfg.prices || {}) },
+        appUpdate: { ...localCfg.appUpdate, ...(cloudCfg.appUpdate || {}) },
+      };
+    }
+  } catch {}
+
+  // Auto-prune salesHistory older than 60 days
+  const cutoff = Date.now() - SIXTY_DAYS_MS;
+  if (Array.isArray(localCfg.salesHistory)) {
+    localCfg.salesHistory = localCfg.salesHistory.filter((r) => (r.createdAt || 0) >= cutoff);
+  } else {
+    localCfg.salesHistory = [];
+  }
+  if (!localCfg.adminEmails.includes(SUPER_ADMIN_EMAIL)) {
+    localCfg.adminEmails = [SUPER_ADMIN_EMAIL, ...localCfg.adminEmails];
+  }
+
+  try {
+    await AsyncStorage.setItem(ADMIN_APP_CONFIG_KEY, JSON.stringify(localCfg));
+  } catch {}
+  return localCfg;
+}
+
+export async function saveAdminAppConfig(cfg: AdminAppConfig): Promise<boolean> {
+  try {
+    const cutoff = Date.now() - SIXTY_DAYS_MS;
+    const prunedSales = Array.isArray(cfg.salesHistory)
+      ? cfg.salesHistory.filter((r) => (r.createdAt || 0) >= cutoff)
+      : [];
+    const cleanCfg: AdminAppConfig = {
+      ...cfg,
+      adminEmails: Array.from(new Set([SUPER_ADMIN_EMAIL, ...(cfg.adminEmails || [])])),
+      salesHistory: prunedSales,
+    };
+    await AsyncStorage.setItem(ADMIN_APP_CONFIG_KEY, JSON.stringify(cleanCfg));
+    try {
+      await supabase.auth.updateUser({
+        data: { toki_admin_config_v2: cleanCfg },
+      });
+    } catch {}
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function getUserPurchaseHistory(): Promise<PurchaseRecord[]> {
+  try {
+    const cutoff = Date.now() - SIXTY_DAYS_MS;
+    const raw = await AsyncStorage.getItem(USER_PURCHASE_HISTORY_KEY);
+    const list: PurchaseRecord[] = raw ? JSON.parse(raw) : [];
+    const valid = list.filter((item) => (item.createdAt || 0) >= cutoff);
+    if (valid.length !== list.length) {
+      await AsyncStorage.setItem(USER_PURCHASE_HISTORY_KEY, JSON.stringify(valid));
+    }
+    return valid;
+  } catch {
+    return [];
+  }
+}
+
+export async function recordUserPurchaseHistory(record: PurchaseRecord): Promise<PurchaseRecord[]> {
+  try {
+    const current = await getUserPurchaseHistory();
+    const updated = [record, ...current.filter((r) => r.id !== record.id)].slice(0, 50);
+    await AsyncStorage.setItem(USER_PURCHASE_HISTORY_KEY, JSON.stringify(updated));
+    return updated;
+  } catch {
+    return [];
+  }
+}
+
+// ============================================================================
 // NOTIFICATIONS ENGINE (100% Online Expo Push + Offline Local Scheduled @ 7 PM)
 // ============================================================================
 
@@ -333,9 +551,9 @@ export async function getInAppNotices(): Promise<AppNoticeItem[]> {
   const initial: AppNoticeItem[] = [
     {
       id: "welcome-1",
-      title: "Focus Lock & Smart CRM Ready",
+      title: "Toki 2.0 — Focus Lock & Pro Ready 👑",
       message:
-        "২৫+৫ মিনিটের সেশন লক, ৫০+১০ মিনিটের শিডিউল লক, ০-৫ ইমার্জেন্সি পাস এবং ৩-ক্যাটাগরির কন্টাক্ট রিমাইন্ডার প্রস্তুত!",
+        "৪৫ মিনিট ডেইলি লকে ৯৯ দিনের স্ট্রিক চ্যালেঞ্জ (৭ দিন ফ্রি প্রো), ২৫+৫ সেশন লক এবং স্মার্ট কন্টাক্ট রিমাইন্ডার প্রস্তুত!",
       timestamp: Date.now() - 3600 * 1000,
       read: false,
       type: "system",
@@ -387,15 +605,15 @@ export interface CachedUserProfile {
   name: string;
   email: string;
   avatarUrl?: string;
-  emergencyPasses: number;
-  streakDays: number;
-  lastSyncedAt: number;
+  emergencyPasses?: number;
+  streakDays?: number;
+  lastSyncedAt?: number;
+  isPro?: boolean;
+  proExpiresAt?: number;
+  proPlanName?: string;
+  accountCode?: string;
 }
 
-/**
- * 🌟 Completely clears previous Gmail's local AsyncStorage and native SharedPreferences
- * so logging in with a new Gmail NEVER inherits the previous account's passes, streak, contacts, or schedules!
- */
 export async function clearAllLocalAccountData(
   newUserId: string = "",
 ): Promise<void> {
@@ -411,6 +629,8 @@ export async function clearAllLocalAccountData(
       "@focus_yt_study_channels",
       "@focus_yt_study_videos",
       "@focus_schedule_break_enabled",
+      USER_PURCHASE_HISTORY_KEY,
+      EXAM_COUNTDOWN_GOAL_KEY,
       IN_APP_NOTICES_KEY,
       CACHED_USER_PROFILE_KEY,
       OFFLINE_SYNC_QUEUE_KEY,
@@ -439,9 +659,6 @@ export async function clearAllLocalAccountData(
   } catch {}
 }
 
-/**
- * Anti-Cheat Online Pass Spending Check
- */
 export async function spendEmergencyPassWithCloudCheck(): Promise<boolean> {
   try {
     if (Platform.OS !== "android" || !FocusLock?.getFocusSessionState) {
@@ -454,7 +671,7 @@ export async function spendEmergencyPassWithCloudCheck(): Promise<boolean> {
     if (localEarned - localUsed <= 0) return false;
 
     const nextUsed = localUsed + 1;
-    const nextPasses = Math.max(0, Math.min(5, localEarned - nextUsed));
+    const nextPasses = Math.max(0, Math.min(15, localEarned - nextUsed));
 
     const {
       data: { user },
@@ -471,7 +688,7 @@ export async function spendEmergencyPassWithCloudCheck(): Promise<boolean> {
       existingBackup.totalPassesEarned ?? existingBackup.emergencyPasses ?? 0,
     );
     const mergedUsed = Math.max(nextUsed, (existingBackup.totalPassesUsed ?? 0) + 1);
-    const finalPasses = Math.max(0, Math.min(5, mergedEarned - mergedUsed));
+    const finalPasses = Math.max(0, Math.min(15, mergedEarned - mergedUsed));
 
     const { error: updateErr } = await supabase.auth.updateUser({
       data: {
@@ -504,7 +721,6 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
 
     if (!currentUser) return false;
 
-    // 🌟 Account Switch Guard: If stored user ID differs from current logged-in Gmail, reset local state and restore ONLY this account's cloud data!
     const storedUserId = await AsyncStorage.getItem(ACTIVE_USER_ID_KEY);
     if (storedUserId && storedUserId !== currentUser.id) {
       await restoreCloudBackupAfterGoogleLogin();
@@ -523,6 +739,7 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
       ytLimitRaw,
       ytStudyLimitRaw,
       studyChannelsRaw,
+      purchaseHistoryRaw,
     ] = await Promise.all([
       AsyncStorage.getItem("@networking_contacts"),
       AsyncStorage.getItem("@networking_stats"),
@@ -532,6 +749,7 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
       AsyncStorage.getItem("@focus_yt_limit_minutes"),
       AsyncStorage.getItem("@focus_yt_study_limit_minutes"),
       AsyncStorage.getItem("@focus_yt_study_channels"),
+      AsyncStorage.getItem(USER_PURCHASE_HISTORY_KEY),
     ]);
 
     const todayIso = new Date().toISOString().split("T")[0];
@@ -547,6 +765,9 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
       ytUsedSeconds: 0,
       ytStudyUsedSeconds: 0,
       ytUsageDate: todayIso,
+      isPro: false,
+      proExpiresAt: 0,
+      proPlanName: "",
     };
 
     if (Platform.OS === "android" && FocusLock?.getFocusSessionState) {
@@ -563,6 +784,9 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
           ytUsedSeconds: s.ytUsedSeconds ?? 0,
           ytStudyUsedSeconds: s.ytStudyUsedSeconds ?? 0,
           ytUsageDate: s.ytUsageDate || todayIso,
+          isPro: !!s.isPro,
+          proExpiresAt: Number(s.proExpiresAt ?? 0),
+          proPlanName: s.proPlanName || "",
         };
       } catch {}
     }
@@ -618,10 +842,18 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
     const cloudUsed = cloudBackup.totalPassesUsed ?? 0;
     const cloudLastDate = cloudBackup.lastCompletedDate || "";
     const cloudStreak = cloudBackup.streakDays ?? 0;
+    const cloudProExpiresAt = Number(cloudBackup.proExpiresAt ?? 0);
+    const cloudProPlanName = cloudBackup.proPlanName || "";
 
     const mergedEarned = Math.max(nativeLockState.totalPassesEarned, cloudEarned);
     const mergedUsed = Math.max(nativeLockState.totalPassesUsed, cloudUsed);
-    const mergedPasses = Math.max(0, Math.min(5, mergedEarned - mergedUsed));
+    const mergedPasses = Math.max(0, Math.min(15, mergedEarned - mergedUsed));
+
+    const mergedProExpiresAt = Math.max(nativeLockState.proExpiresAt, cloudProExpiresAt);
+    const mergedProPlanName =
+      cloudProExpiresAt >= nativeLockState.proExpiresAt && cloudProPlanName
+        ? cloudProPlanName
+        : nativeLockState.proPlanName;
 
     let mergedLastDate = nativeLockState.lastCompletedDate;
     let mergedStreak = nativeLockState.streakDays;
@@ -681,14 +913,36 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
         activeDate,
         mergedYtUsedSeconds,
         mergedYtStudyUsedSeconds,
+        mergedProExpiresAt,
+        mergedProPlanName,
       );
     }
+
+    // Merge 60-day purchase history
+    const cutoff = Date.now() - SIXTY_DAYS_MS;
+    const localPurchases: PurchaseRecord[] = purchaseHistoryRaw ? JSON.parse(purchaseHistoryRaw) : [];
+    const cloudPurchases: PurchaseRecord[] = Array.isArray(cloudBackup.purchaseHistory)
+      ? cloudBackup.purchaseHistory
+      : [];
+    const mergedMap = new Map<string, PurchaseRecord>();
+    [...cloudPurchases, ...localPurchases].forEach((p) => {
+      if (p && p.id && (p.createdAt || 0) >= cutoff) {
+        mergedMap.set(p.id, p);
+      }
+    });
+    const mergedPurchaseHistory = Array.from(mergedMap.values()).sort(
+      (a, b) => b.createdAt - a.createdAt,
+    );
+    await AsyncStorage.setItem(USER_PURCHASE_HISTORY_KEY, JSON.stringify(mergedPurchaseHistory));
 
     const cachedRaw = await AsyncStorage.getItem(CACHED_USER_PROFILE_KEY);
     if (cachedRaw) {
       const cached: CachedUserProfile = JSON.parse(cachedRaw);
       cached.emergencyPasses = mergedPasses;
       cached.streakDays = mergedStreak;
+      cached.isPro = mergedProExpiresAt > Date.now();
+      cached.proExpiresAt = mergedProExpiresAt;
+      cached.proPlanName = mergedProPlanName;
       await AsyncStorage.setItem(
         CACHED_USER_PROFILE_KEY,
         JSON.stringify(cached),
@@ -732,6 +986,10 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
         lastCompletedDate: mergedLastDate,
         completedHistory: mergedHistoryObj,
         totalCompleted: mergedTotalCompleted,
+        isPro: mergedProExpiresAt > Date.now(),
+        proExpiresAt: mergedProExpiresAt,
+        proPlanName: mergedProPlanName,
+        purchaseHistory: mergedPurchaseHistory,
       },
     };
 
@@ -746,13 +1004,17 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
         name:
           data.user.user_metadata?.full_name ||
           data.user.user_metadata?.name ||
-          "JnUITS Member",
+          "Toki User",
         email: data.user.email || "",
         avatarUrl:
           data.user.user_metadata?.avatar_url ||
           data.user.user_metadata?.picture,
         emergencyPasses: mergedPasses,
         streakDays: mergedStreak,
+        isPro: mergedProExpiresAt > Date.now(),
+        proExpiresAt: mergedProExpiresAt,
+        proPlanName: mergedProPlanName,
+        accountCode: getAccountCodeForUser(data.user.id || data.user.email || "toki-user"),
         lastSyncedAt: Date.now(),
       };
       await AsyncStorage.setItem(
@@ -776,7 +1038,6 @@ export async function restoreCloudBackupAfterGoogleLogin(): Promise<void> {
     } = await supabase.auth.getUser();
     if (!user) return;
 
-    // 🌟 100% Account-Wise Isolation: If switching Gmails or logging into a new account, wipe all previous local & native data first!
     const previousUserId = await AsyncStorage.getItem(ACTIVE_USER_ID_KEY);
     if (previousUserId !== user.id) {
       await clearAllLocalAccountData(user.id);
@@ -796,6 +1057,29 @@ export async function restoreCloudBackupAfterGoogleLogin(): Promise<void> {
         await AsyncStorage.setItem(
           "@networking_stats",
           JSON.stringify(backup.networkingStats),
+        );
+      }
+
+      if (Array.isArray(backup.purchaseHistory) && backup.purchaseHistory.length > 0) {
+        const cutoff = Date.now() - SIXTY_DAYS_MS;
+        const validHistory = backup.purchaseHistory.filter((r: any) => (r.createdAt || 0) >= cutoff);
+        await AsyncStorage.setItem(USER_PURCHASE_HISTORY_KEY, JSON.stringify(validHistory));
+      }
+
+      if (Platform.OS === "android" && FocusLock?.syncPassAndStreakFromCloud) {
+        await FocusLock.syncPassAndStreakFromCloud(
+          backup.emergencyPasses ?? 0,
+          backup.streakDays ?? 0,
+          backup.lastCompletedDate || "",
+          backup.totalPassesEarned ?? backup.emergencyPasses ?? 0,
+          backup.totalPassesUsed ?? 0,
+          JSON.stringify(backup.completedHistory || {}),
+          backup.totalCompleted ?? 0,
+          backup.ytUsageDate || "",
+          backup.ytUsedSeconds ?? 0,
+          backup.ytStudyUsedSeconds ?? 0,
+          Number(backup.proExpiresAt ?? 0),
+          backup.proPlanName || "",
         );
       }
 
@@ -887,21 +1171,6 @@ export async function restoreCloudBackupAfterGoogleLogin(): Promise<void> {
             ytLimit,
           );
         }
-      }
-
-      if (Platform.OS === "android" && FocusLock?.syncPassAndStreakFromCloud) {
-        await FocusLock.syncPassAndStreakFromCloud(
-          backup.emergencyPasses ?? 0,
-          backup.streakDays ?? 0,
-          backup.lastCompletedDate || "",
-          backup.totalPassesEarned ?? backup.emergencyPasses ?? 0,
-          backup.totalPassesUsed ?? 0,
-          JSON.stringify(backup.completedHistory || {}),
-          backup.totalCompleted ?? 0,
-          backup.ytUsageDate || "",
-          backup.ytUsedSeconds ?? 0,
-          backup.ytStudyUsedSeconds ?? 0,
-        );
       }
     }
 

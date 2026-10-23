@@ -1,62 +1,39 @@
-import React, { useState, useCallback } from 'react';
+import { Feather, Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useFocusEffect, useRouter } from 'expo-router';
+import React, { useCallback, useState } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
-  ScrollView,
-  TouchableOpacity,
+  ActivityIndicator,
   Image,
+  Linking,
+  Modal,
   NativeModules,
   RefreshControl,
-  Modal,
-  ActivityIndicator,
-  TextInput,
-  Linking,
+  ScrollView,
   Share,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
 } from 'react-native';
 import {
-  ShieldCheck,
-  Award,
-  Flame,
-  Clock,
-  LogOut,
-  Users,
-  Calendar,
-  Zap,
-  CheckCircle2,
-  Sparkles,
-  RefreshCw,
-  Crown,
-  KeyRound,
-  MessageCircle,
-  Copy,
-  History,
-  Settings,
-  Fingerprint,
-  Plus,
-  Trash2,
-  Send,
-  BellRing,
-} from 'lucide-react-native';
-import { useFocusEffect, useRouter } from 'expo-router';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import {
-  supabase,
+  AdminAppConfig,
   CACHED_USER_PROFILE_KEY,
   CachedUserProfile,
-  clearAllLocalAccountData,
-  syncLocalDataToCloudIfOnline,
-  restoreCloudBackupAfterGoogleLogin,
-  SUPER_ADMIN_EMAIL,
   CURRENT_APP_VERSION,
-  AdminAppConfig,
   PurchaseRecord,
+  SUPER_ADMIN_EMAIL,
+  clearAllLocalAccountData,
   getAccountCodeForUser,
-  isUserAdmin,
   getAdminAppConfig,
-  saveAdminAppConfig,
   getUserPurchaseHistory,
+  isUserAdmin,
   recordUserPurchaseHistory,
+  restoreCloudBackupAfterGoogleLogin,
+  saveAdminAppConfig,
+  supabase,
+  syncLocalDataToCloudIfOnline,
 } from '../../lib/supabase';
 
 const { FocusLock } = NativeModules;
@@ -661,9 +638,9 @@ export default function ProfileScreen() {
             )}
             <View style={[styles.onlineBadge, focusStats.isPro && { backgroundColor: '#F59E0B' }]}>
               {focusStats.isPro ? (
-                <Crown size={12} color="#0F172A" />
+                <MaterialCommunityIcons name="crown" size={13} color="#0F172A" />
               ) : (
-                <Sparkles size={11} color="#0F172A" />
+                <Ionicons name="sparkles" size={11} color="#0F172A" />
               )}
             </View>
           </View>
@@ -680,9 +657,9 @@ export default function ProfileScreen() {
               }).catch(() => {})
             }
           >
-            <KeyRound size={13} color="#38BDF8" />
+            <Ionicons name="key-outline" size={13} color="#38BDF8" />
             <Text style={styles.accountCodeText}>Account Code: {focusStats.accountCode}</Text>
-            <Copy size={12} color="#94A3B8" />
+            <Feather name="copy" size={12} color="#94A3B8" />
           </TouchableOpacity>
 
           <View style={styles.headerActionRow}>
@@ -693,7 +670,11 @@ export default function ProfileScreen() {
                 setStoreModalVisible(true);
               }}
             >
-              <Crown size={14} color={focusStats.isPro ? '#0F172A' : '#FBBF24'} />
+              <MaterialCommunityIcons
+                name="crown"
+                size={15}
+                color={focusStats.isPro ? '#0F172A' : '#FBBF24'}
+              />
               <Text style={[styles.proStatusPillText, focusStats.isPro && { color: '#0F172A' }]}>
                 {focusStats.isPro
                   ? `Toki Pro 👑 (${focusStats.proDaysRemaining} দিন বাকি)`
@@ -710,7 +691,7 @@ export default function ProfileScreen() {
                 <ActivityIndicator size="small" color="#38BDF8" />
               ) : (
                 <>
-                  <RefreshCw size={12} color="#38BDF8" />
+                  <Feather name="refresh-cw" size={12} color="#38BDF8" />
                   <Text style={styles.syncButtonText}>Cloud Sync</Text>
                 </>
               )}
@@ -720,7 +701,7 @@ export default function ProfileScreen() {
           {/* Super Admin Fingerprint Button (ONLY visible to Admin emails) */}
           {userIsAdmin && (
             <TouchableOpacity style={styles.adminAccessBtn} onPress={handleOpenAdminPanel}>
-              <Fingerprint size={18} color="#FDE68A" />
+              <Ionicons name="finger-print" size={18} color="#FDE68A" />
               <Text style={styles.adminAccessBtnText}>
                 👑 Admin Control Panel (Fingerprint Verified)
               </Text>
@@ -732,7 +713,7 @@ export default function ProfileScreen() {
         <View style={styles.streakRewardCard}>
           <View style={styles.streakRewardTop}>
             <View style={styles.streakRewardBadge}>
-              <Flame size={20} color="#F97316" />
+              <Ionicons name="flame" size={20} color="#F97316" />
             </View>
             <View style={{ flex: 1 }}>
               <Text style={styles.streakRewardTitle}>
@@ -763,7 +744,7 @@ export default function ProfileScreen() {
               setStoreModalVisible(true);
             }}
           >
-            <ShieldCheck size={18} color="#10B981" />
+            <Ionicons name="shield-checkmark" size={18} color="#10B981" />
             <View style={{ flex: 1 }}>
               <Text style={styles.quickPassTitle}>এমারজেন্সি পাস কিনুন</Text>
               <Text style={styles.quickPassSub}>
@@ -779,7 +760,7 @@ export default function ProfileScreen() {
               setStoreModalVisible(true);
             }}
           >
-            <KeyRound size={18} color="#38BDF8" />
+            <Ionicons name="key" size={18} color="#38BDF8" />
             <Text style={styles.quickRedeemText}>Redeem Key</Text>
           </TouchableOpacity>
         </View>
@@ -789,7 +770,7 @@ export default function ProfileScreen() {
         <View style={styles.statsGrid}>
           <View style={styles.statBox}>
             <View style={[styles.statIconWrap, { backgroundColor: 'rgba(249, 115, 22, 0.15)' }]}>
-              <Flame size={22} color="#F97316" />
+              <Ionicons name="flame" size={22} color="#F97316" />
             </View>
             <Text style={styles.statValue}>{focusStats.streakDays} দিন</Text>
             <Text style={styles.statLabel}>টানা স্ট্রিক (≥45m)</Text>
@@ -797,7 +778,7 @@ export default function ProfileScreen() {
 
           <View style={styles.statBox}>
             <View style={[styles.statIconWrap, { backgroundColor: 'rgba(56, 189, 248, 0.15)' }]}>
-              <Clock size={22} color="#38BDF8" />
+              <Ionicons name="time" size={22} color="#38BDF8" />
             </View>
             <Text style={styles.statValue}>{totalHours} ঘণ্টা</Text>
             <Text style={styles.statLabel}>মোট ডিপ ফোকাস</Text>
@@ -805,7 +786,7 @@ export default function ProfileScreen() {
 
           <View style={styles.statBox}>
             <View style={[styles.statIconWrap, { backgroundColor: 'rgba(16, 185, 129, 0.15)' }]}>
-              <ShieldCheck size={22} color="#10B981" />
+              <Ionicons name="shield-checkmark" size={22} color="#10B981" />
             </View>
             <Text style={styles.statValue}>{focusStats.emergencyPasses} টি</Text>
             <Text style={styles.statLabel}>এমারজেন্সি পাস</Text>
@@ -813,7 +794,7 @@ export default function ProfileScreen() {
 
           <View style={styles.statBox}>
             <View style={[styles.statIconWrap, { backgroundColor: 'rgba(168, 85, 247, 0.15)' }]}>
-              <Award size={22} color="#A855F7" />
+              <Ionicons name="ribbon" size={22} color="#A855F7" />
             </View>
             <Text style={styles.statValue}>{focusStats.completedSessions} বার</Text>
             <Text style={styles.statLabel}>সফল লক সেশন</Text>
@@ -831,7 +812,7 @@ export default function ProfileScreen() {
                   : 'ফ্রি ভার্সনে ১৪ দিন দৃশ্যমান (৬০ দিনের পূর্ণ গ্রাফ দেখতে Toki Pro নিন)'}
               </Text>
             </View>
-            <Zap size={20} color="#10B981" />
+            <Ionicons name="flash" size={20} color="#10B981" />
           </View>
 
           <View style={styles.heatmapGrid}>
@@ -856,7 +837,7 @@ export default function ProfileScreen() {
         <View style={styles.summaryListCard}>
           <View style={styles.historyHeaderRow}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-              <History size={18} color="#38BDF8" />
+              <MaterialCommunityIcons name="history" size={18} color="#38BDF8" />
               <Text style={styles.historyHeaderTitle}>প্রো ও পাস হিস্ট্রি (৬০ দিন অটো-ক্লিন)</Text>
             </View>
             <TouchableOpacity
@@ -906,7 +887,7 @@ export default function ProfileScreen() {
             onPress={() => router.push('/features/StrictFocusScreen')}
           >
             <View style={[styles.summaryIcon, { backgroundColor: 'rgba(56, 189, 248, 0.15)' }]}>
-              <Calendar size={18} color="#38BDF8" />
+              <Ionicons name="calendar" size={18} color="#38BDF8" />
             </View>
             <View style={{ flex: 1 }}>
               <Text style={styles.summaryRowTitle}>সক্রিয় ডেইলি শিডিউল লক</Text>
@@ -926,7 +907,7 @@ export default function ProfileScreen() {
             onPress={() => router.push('/features/SmartNetworking')}
           >
             <View style={[styles.summaryIcon, { backgroundColor: 'rgba(16, 185, 129, 0.15)' }]}>
-              <Users size={18} color="#10B981" />
+              <Ionicons name="people" size={18} color="#10B981" />
             </View>
             <View style={{ flex: 1 }}>
               <Text style={styles.summaryRowTitle}>নেটওয়ার্কিং কন্টাক্টস</Text>
@@ -942,7 +923,7 @@ export default function ProfileScreen() {
 
         {/* Logout Action */}
         <TouchableOpacity style={styles.logoutBtn} onPress={() => setLogoutModalVisible(true)}>
-          <LogOut size={18} color="#F87171" />
+          <Ionicons name="log-out-outline" size={19} color="#F87171" />
           <Text style={styles.logoutBtnText}>অ্যাকাউন্ট লগআউট করুন</Text>
         </TouchableOpacity>
       </ScrollView>
@@ -960,7 +941,7 @@ export default function ProfileScreen() {
           <View style={[styles.modalCard, { maxHeight: '92%', width: '100%' }]}>
             <View style={styles.storeHeaderRow}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                <Crown size={22} color="#FBBF24" />
+                <MaterialCommunityIcons name="crown" size={22} color="#FBBF24" />
                 <Text style={styles.storeHeaderTitle}>Toki Pro 👑 & Pass Store</Text>
               </View>
               <TouchableOpacity onPress={() => setStoreModalVisible(false)}>
@@ -1120,7 +1101,7 @@ export default function ProfileScreen() {
                       onPress={handleSubmitPaymentRequest}
                       disabled={submittingAction}
                     >
-                      <MessageCircle size={18} color="#0F172A" />
+                      <Ionicons name="logo-whatsapp" size={18} color="#0F172A" />
                       <Text style={styles.submitPaymentBtnText}>
                         পেমেন্ট সাবমিট করুন ও WhatsApp-এ কোড নিন
                       </Text>
@@ -1156,7 +1137,7 @@ export default function ProfileScreen() {
                     onPress={handleRedeemActivationKey}
                     disabled={submittingAction}
                   >
-                    <CheckCircle2 size={18} color="#0F172A" />
+                    <Ionicons name="checkmark-circle" size={18} color="#0F172A" />
                     <Text style={styles.submitPaymentBtnText}>অ্যাক্টিভেট করুন</Text>
                   </TouchableOpacity>
                 </View>
@@ -1218,7 +1199,7 @@ export default function ProfileScreen() {
           <View style={[styles.modalCard, { maxHeight: '94%', width: '100%' }]}>
             <View style={styles.storeHeaderRow}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                <Fingerprint size={22} color="#38BDF8" />
+                <Ionicons name="finger-print" size={22} color="#38BDF8" />
                 <Text style={styles.storeHeaderTitle}>👑 Toki Admin Control Panel</Text>
               </View>
               <TouchableOpacity onPress={() => setAdminModalVisible(false)}>
@@ -1286,7 +1267,7 @@ export default function ProfileScreen() {
                   </View>
 
                   <TouchableOpacity style={styles.submitPaymentBtn} onPress={handleAdminGenerateKey}>
-                    <KeyRound size={18} color="#0F172A" />
+                    <Ionicons name="key" size={18} color="#0F172A" />
                     <Text style={styles.submitPaymentBtnText}>Generate Cryptographic Key</Text>
                   </TouchableOpacity>
 
@@ -1307,7 +1288,7 @@ export default function ProfileScreen() {
                             }).catch(() => {})
                           }
                         >
-                          <Send size={14} color="#0F172A" />
+                          <Ionicons name="send" size={14} color="#0F172A" />
                           <Text style={styles.smallAdminBtnText}>Share / Send Key</Text>
                         </TouchableOpacity>
 
@@ -1329,7 +1310,7 @@ export default function ProfileScreen() {
                               }
                             }}
                           >
-                            <CheckCircle2 size={14} color="#0F172A" />
+                            <Ionicons name="checkmark-circle" size={14} color="#0F172A" />
                             <Text style={styles.smallAdminBtnText}>Apply to My Phone</Text>
                           </TouchableOpacity>
                         )}
@@ -1381,7 +1362,7 @@ export default function ProfileScreen() {
                           ]}
                           onPress={() => handleApproveRequestAndSendKey(req)}
                         >
-                          <CheckCircle2 size={14} color="#0F172A" />
+                          <Ionicons name="checkmark-circle" size={14} color="#0F172A" />
                           <Text style={styles.smallAdminBtnText}>
                             Approve & Send Key on WhatsApp
                           </Text>
@@ -1468,7 +1449,7 @@ export default function ProfileScreen() {
                     style={styles.submitPaymentBtn}
                     onPress={handleSaveAdminSettings}
                   >
-                    <Settings size={18} color="#0F172A" />
+                    <Ionicons name="settings" size={18} color="#0F172A" />
                     <Text style={styles.submitPaymentBtnText}>সেটিংস সেভ করুন (Fingerprint)</Text>
                   </TouchableOpacity>
 
@@ -1482,7 +1463,7 @@ export default function ProfileScreen() {
                         <Text style={styles.superAdminTag}>Super Admin</Text>
                       ) : (
                         <TouchableOpacity onPress={() => handleRemoveAdminEmail(email)}>
-                          <Trash2 size={16} color="#F87171" />
+                          <Ionicons name="trash-outline" size={16} color="#F87171" />
                         </TouchableOpacity>
                       )}
                     </View>
@@ -1498,7 +1479,7 @@ export default function ProfileScreen() {
                       autoCapitalize="none"
                     />
                     <TouchableOpacity style={styles.addAdminBtn} onPress={handleAddAdminEmail}>
-                      <Plus size={18} color="#0F172A" />
+                      <Ionicons name="add" size={20} color="#0F172A" />
                     </TouchableOpacity>
                   </View>
                 </View>
@@ -1548,7 +1529,11 @@ export default function ProfileScreen() {
                     style={styles.forceUpdateToggle}
                     onPress={() => setEditOtaForce(!editOtaForce)}
                   >
-                    <BellRing size={18} color={editOtaForce ? '#F59E0B' : '#94A3B8'} />
+                    <Ionicons
+                      name="notifications"
+                      size={18}
+                      color={editOtaForce ? '#F59E0B' : '#94A3B8'}
+                    />
                     <Text style={styles.forceUpdateText}>
                       Force Update (ইউজারকে অবশ্যই আপডেট করতে হবে):{' '}
                       {editOtaForce ? 'হ্যাঁ ✅' : 'না'}
@@ -1559,7 +1544,7 @@ export default function ProfileScreen() {
                     style={styles.submitPaymentBtn}
                     onPress={handleSaveAdminSettings}
                   >
-                    <Send size={18} color="#0F172A" />
+                    <Ionicons name="send" size={18} color="#0F172A" />
                     <Text style={styles.submitPaymentBtnText}>আপডেট অ্যালার্ট পাবলিশ করুন</Text>
                   </TouchableOpacity>
                 </View>
@@ -1611,7 +1596,7 @@ export default function ProfileScreen() {
         <View style={styles.modalBackdrop}>
           <View style={styles.modalCard}>
             <View style={styles.modalIconWrap}>
-              <LogOut size={28} color="#F87171" />
+              <Ionicons name="log-out-outline" size={28} color="#F87171" />
             </View>
             <Text style={styles.modalTitle}>অ্যাকাউন্ট লগআউট করবেন?</Text>
             <Text style={styles.modalSub}>

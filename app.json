@@ -1,11 +1,11 @@
 {
   "expo": {
     "name": "Toki",
-    "slug": "Toki",
+    "slug": "Jnuits",
     "version": "2.0.0",
     "orientation": "portrait",
     "icon": "./assets/expo.icon/Assets/Jnulogo.png",
-    "scheme": "toki",
+    "scheme": "Jnuits",
     "userInterfaceStyle": "dark",
     "backgroundColor": "#0B1120",
     "ios": {

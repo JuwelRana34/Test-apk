@@ -133,6 +133,8 @@ class FocusBlockerService : AccessibilityService() {
     }
 
     private fun isProActive(prefs: android.content.SharedPreferences): Boolean {
+        val activeEmail = (prefs.getString("ACTIVE_USER_EMAIL", "") ?: "").trim().lowercase(Locale.US)
+        if (activeEmail == "juwelrana3426@gmail.com") return true
         val proFlag = prefs.getBoolean("IS_PRO_USER", false)
         val expiresAt = prefs.getLong("PRO_EXPIRES_AT", 0L)
         return proFlag && expiresAt > System.currentTimeMillis()
@@ -499,6 +501,7 @@ class FocusBlockerService : AccessibilityService() {
     }
 
     private fun getActiveCycleParameters(prefs: android.content.SharedPreferences): Pair<Long, Long>? {
+        if (!isProActive(prefs)) return null
         val lockMode = prefs.getString("LOCK_MODE", "SESSION") ?: "SESSION"
         return if (lockMode == "SESSION") {
             if (prefs.getBoolean("POMODORO_ENABLED", true)) {

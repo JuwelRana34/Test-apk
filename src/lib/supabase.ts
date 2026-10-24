@@ -21,7 +21,7 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
 const { FocusLock } = NativeModules;
 
 // ============================================================================
-// TOKI v2.0.0 — PRO, ADMIN, OTA UPDATE, EXAM COUNTDOWN & 60-DAY HISTORY ENGINE
+// TOKI v2.0.0 — GLOBAL CLOUD STORE (public.toki_cloud_store), PRO, ADMIN & OTA
 // ============================================================================
 
 export const CURRENT_APP_VERSION = "2.0.0";
@@ -29,7 +29,12 @@ export const SUPER_ADMIN_EMAIL = "juwelrana3426@gmail.com";
 export const ADMIN_APP_CONFIG_KEY = "@toki_admin_app_config_v2";
 export const USER_PURCHASE_HISTORY_KEY = "@toki_user_purchase_history_v2";
 export const EXAM_COUNTDOWN_GOAL_KEY = "@toki_exam_countdown_goal_v2";
+export const APPLIED_CLOUD_REQ_IDS_KEY = "@toki_applied_cloud_req_ids_v2";
+export const REVOKED_CLOUD_MARKERS_KEY = "@toki_revoked_cloud_markers_v2";
+export const PRO_EXPIRY_WARN_DATE_KEY = "@toki_pro_expiry_warn_date_v2";
+const GLOBAL_STORE_ROW_ID = "global_admin_store_v2";
 const SIXTY_DAYS_MS = 60 * 24 * 60 * 60 * 1000;
+const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
 
 export interface ExamCountdownGoal {
   title: string;
@@ -45,10 +50,11 @@ export interface PurchaseRecord {
   amountBdt: number;
   trxId: string;
   senderPhone: string;
-  status: "pending" | "approved";
+  status: "pending" | "approved" | "cancelled";
   activationKey?: string;
   createdAt: number;
   expiresAt: number;
+  revokedAt?: number;
 }
 
 export interface AdminAppConfig {
@@ -70,6 +76,7 @@ export interface AdminAppConfig {
     forceUpdate: boolean;
   };
   salesHistory?: PurchaseRecord[];
+  revokedAccounts?: Record<string, number>; // accountCode -> revokedTimestamp
 }
 
 export const DEFAULT_ADMIN_CONFIG: AdminAppConfig = {
@@ -91,6 +98,7 @@ export const DEFAULT_ADMIN_CONFIG: AdminAppConfig = {
     forceUpdate: false,
   },
   salesHistory: [],
+  revokedAccounts: {},
 };
 
 export function getAccountCodeForUser(userIdOrEmail: string): string {
@@ -105,6 +113,11 @@ export function getAccountCodeForUser(userIdOrEmail: string): string {
   h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
   const hex = (h1 >>> 0).toString(16).toUpperCase().padStart(8, "0");
   return `TK-${hex}`;
+}
+
+export function isSuperAdminEmail(email?: string | null): boolean {
+  if (!email) return false;
+  return email.trim().toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase();
 }
 
 export function isUserAdmin(email?: string | null, cfg?: AdminAppConfig | null): boolean {
@@ -144,6 +157,9 @@ export async function saveExamCountdownGoal(goal: ExamCountdownGoal): Promise<vo
   } catch {}
 }
 
+/**
+ * Fetches Global Admin Config & Shared Sales Requests from public.toki_cloud_store
+ */
 export async function getAdminAppConfig(): Promise<AdminAppConfig> {
   let localCfg: AdminAppConfig = { ...DEFAULT_ADMIN_CONFIG };
   try {
@@ -155,19 +171,43 @@ export async function getAdminAppConfig(): Promise<AdminAppConfig> {
         ...parsed,
         prices: { ...DEFAULT_ADMIN_CONFIG.prices, ...(parsed.prices || {}) },
         appUpdate: { ...DEFAULT_ADMIN_CONFIG.appUpdate, ...(parsed.appUpdate || {}) },
+        revokedAccounts: { ...(parsed.revokedAccounts || {}) },
       };
     }
   } catch {}
 
+  // 1. Primary Shared Cloud Table: public.toki_cloud_store
   try {
-    const { data } = await supabase.auth.getUser();
-    const cloudCfg = data?.user?.user_metadata?.toki_admin_config_v2;
-    if (cloudCfg && typeof cloudCfg === "object") {
+    const { data: rowData, error: rowErr } = await supabase
+      .from("toki_cloud_store")
+      .select("payload")
+      .eq("id", GLOBAL_STORE_ROW_ID)
+      .maybeSingle();
+
+    if (!rowErr && rowData?.payload && typeof rowData.payload === "object") {
+      const cloudCfg = rowData.payload as Partial<AdminAppConfig>;
+      const mergedSalesMap = new Map<string, PurchaseRecord>();
+      [...(localCfg.salesHistory || []), ...(cloudCfg.salesHistory || [])].forEach((item) => {
+        if (item && item.id) {
+          const existing = mergedSalesMap.get(item.id);
+          if (!existing || item.status !== "pending") {
+            mergedSalesMap.set(item.id, item);
+          }
+        }
+      });
+
       localCfg = {
         ...localCfg,
         ...cloudCfg,
         prices: { ...localCfg.prices, ...(cloudCfg.prices || {}) },
         appUpdate: { ...localCfg.appUpdate, ...(cloudCfg.appUpdate || {}) },
+        salesHistory: Array.from(mergedSalesMap.values()).sort(
+          (a, b) => (b.createdAt || 0) - (a.createdAt || 0),
+        ),
+        revokedAccounts: {
+          ...(localCfg.revokedAccounts || {}),
+          ...(cloudCfg.revokedAccounts || {}),
+        },
       };
     }
   } catch {}
@@ -189,6 +229,9 @@ export async function getAdminAppConfig(): Promise<AdminAppConfig> {
   return localCfg;
 }
 
+/**
+ * Saves Global Admin Config & Shared Sales Requests to public.toki_cloud_store
+ */
 export async function saveAdminAppConfig(cfg: AdminAppConfig): Promise<boolean> {
   try {
     const cutoff = Date.now() - SIXTY_DAYS_MS;
@@ -199,14 +242,114 @@ export async function saveAdminAppConfig(cfg: AdminAppConfig): Promise<boolean> 
       ...cfg,
       adminEmails: Array.from(new Set([SUPER_ADMIN_EMAIL, ...(cfg.adminEmails || [])])),
       salesHistory: prunedSales,
+      revokedAccounts: cfg.revokedAccounts || {},
     };
     await AsyncStorage.setItem(ADMIN_APP_CONFIG_KEY, JSON.stringify(cleanCfg));
+
+    try {
+      await supabase.from("toki_cloud_store").upsert(
+        {
+          id: GLOBAL_STORE_ROW_ID,
+          payload: cleanCfg,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "id" },
+      );
+    } catch {}
+
     try {
       await supabase.auth.updateUser({
         data: { toki_admin_config_v2: cleanCfg },
       });
     } catch {}
     return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Called by User when submitting a payment request (In-App or with WhatsApp)
+ */
+export async function submitUserPaymentRequestToCloud(
+  record: PurchaseRecord,
+): Promise<boolean> {
+  try {
+    await recordUserPurchaseHistory(record);
+    const currentCfg = await getAdminAppConfig();
+    const updatedSales = [
+      record,
+      ...(currentCfg.salesHistory || []).filter((r) => r.id !== record.id),
+    ];
+    const nextCfg: AdminAppConfig = {
+      ...currentCfg,
+      salesHistory: updatedSales,
+    };
+    await saveAdminAppConfig(nextCfg);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Called by Admin when clicking "Approve / Active করুন"
+ */
+export async function adminApprovePaymentRequestInCloud(
+  reqId: string,
+  generatedKey: string,
+): Promise<boolean> {
+  try {
+    const currentCfg = await getAdminAppConfig();
+    const updatedSales = (currentCfg.salesHistory || []).map((item) =>
+      item.id === reqId
+        ? { ...item, status: "approved" as const, activationKey: generatedKey }
+        : item,
+    );
+    const nextCfg: AdminAppConfig = {
+      ...currentCfg,
+      salesHistory: updatedSales,
+    };
+    return await saveAdminAppConfig(nextCfg);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Called by Admin when clicking "Cancel / Revoke" on a request or Account Code
+ */
+export async function adminCancelOrRevokePurchaseInCloud(
+  reqIdOrAccountCode: string,
+): Promise<boolean> {
+  try {
+    const cleanTarget = reqIdOrAccountCode.trim();
+    const currentCfg = await getAdminAppConfig();
+    const now = Date.now();
+    let targetAccCode = cleanTarget.toUpperCase();
+
+    const updatedSales = (currentCfg.salesHistory || []).map((item) => {
+      if (
+        item.id === cleanTarget ||
+        item.accountCode.toUpperCase() === cleanTarget.toUpperCase()
+      ) {
+        targetAccCode = item.accountCode.toUpperCase();
+        return { ...item, status: "cancelled" as const, revokedAt: now };
+      }
+      return item;
+    });
+
+    const nextRevoked = {
+      ...(currentCfg.revokedAccounts || {}),
+      [targetAccCode]: now,
+    };
+
+    const nextCfg: AdminAppConfig = {
+      ...currentCfg,
+      salesHistory: updatedSales,
+      revokedAccounts: nextRevoked,
+    };
+    return await saveAdminAppConfig(nextCfg);
   } catch {
     return false;
   }
@@ -227,15 +370,165 @@ export async function getUserPurchaseHistory(): Promise<PurchaseRecord[]> {
   }
 }
 
-export async function recordUserPurchaseHistory(record: PurchaseRecord): Promise<PurchaseRecord[]> {
+export async function recordUserPurchaseHistory(
+  record: PurchaseRecord,
+): Promise<PurchaseRecord[]> {
   try {
     const current = await getUserPurchaseHistory();
-    const updated = [record, ...current.filter((r) => r.id !== record.id)].slice(0, 50);
+    // If redeeming a key manually, also mark any matching pending request for same planType as approved!
+    const normalized = current.map((r) => {
+      if (
+        record.status === "approved" &&
+        r.status === "pending" &&
+        r.planType === record.planType
+      ) {
+        return {
+          ...r,
+          status: "approved" as const,
+          activationKey: record.activationKey,
+        };
+      }
+      return r;
+    });
+    const updated = [record, ...normalized.filter((r) => r.id !== record.id)].slice(0, 50);
     await AsyncStorage.setItem(USER_PURCHASE_HISTORY_KEY, JSON.stringify(updated));
     return updated;
   } catch {
     return [];
   }
+}
+
+/**
+ * Synchronizes User's Pending/Approved/Cancelled Requests with Global Cloud Store
+ * & Checks 3-Day Pro Expiry Warning Notification!
+ */
+export async function syncUserPurchasesAndProExpiryWithCloud(
+  userId: string,
+  userEmail: string,
+): Promise<void> {
+  try {
+    const accountCode = getAccountCodeForUser(userId || userEmail);
+    const superAdmin = isSuperAdminEmail(userEmail);
+
+    if (Platform.OS === "android" && FocusLock?.setSuperAdminUserEmail && userEmail) {
+      await FocusLock.setSuperAdminUserEmail(userEmail);
+    }
+
+    const cfg = await getAdminAppConfig();
+    const localHistory = await getUserPurchaseHistory();
+
+    const appliedRaw = await AsyncStorage.getItem(APPLIED_CLOUD_REQ_IDS_KEY);
+    const appliedIds: string[] = appliedRaw ? JSON.parse(appliedRaw) : [];
+
+    const revokedRaw = await AsyncStorage.getItem(REVOKED_CLOUD_MARKERS_KEY);
+    const revokedMap: Record<string, number> = revokedRaw ? JSON.parse(revokedRaw) : {};
+
+    let historyChanged = false;
+    const updatedLocalHistory = [...localHistory];
+
+    // 1. Check matching requests in global salesHistory for this user
+    const userGlobalReqs = (cfg.salesHistory || []).filter(
+      (r) =>
+        r.accountCode?.toUpperCase() === accountCode.toUpperCase() ||
+        (userEmail && r.userEmail?.toLowerCase() === userEmail.toLowerCase()),
+    );
+
+    for (const cReq of userGlobalReqs) {
+      const localIdx = updatedLocalHistory.findIndex((l) => l.id === cReq.id);
+      if (localIdx >= 0) {
+        if (updatedLocalHistory[localIdx].status !== cReq.status) {
+          updatedLocalHistory[localIdx] = { ...updatedLocalHistory[localIdx], ...cReq };
+          historyChanged = true;
+        }
+      } else {
+        updatedLocalHistory.unshift(cReq);
+        historyChanged = true;
+      }
+
+      // Auto-apply newly approved request on user's phone!
+      if (
+        cReq.status === "approved" &&
+        cReq.activationKey &&
+        !appliedIds.includes(cReq.id)
+      ) {
+        if (Platform.OS === "android" && FocusLock?.verifyAndApplyActivationKey) {
+          try {
+            await FocusLock.verifyAndApplyActivationKey(accountCode, cReq.activationKey);
+          } catch {}
+        }
+        appliedIds.push(cReq.id);
+        await AsyncStorage.setItem(APPLIED_CLOUD_REQ_IDS_KEY, JSON.stringify(appliedIds));
+      }
+    }
+
+    // 2. Check if Admin revoked/cancelled this user's subscription
+    const cloudRevokedAt = cfg.revokedAccounts?.[accountCode.toUpperCase()] || 0;
+    const lastHandledRevoke = revokedMap[accountCode.toUpperCase()] || 0;
+    if (cloudRevokedAt > lastHandledRevoke && !superAdmin) {
+      if (Platform.OS === "android" && FocusLock?.revokeProSubscriptionNative) {
+        try {
+          await FocusLock.revokeProSubscriptionNative(2);
+        } catch {}
+      }
+      revokedMap[accountCode.toUpperCase()] = cloudRevokedAt;
+      await AsyncStorage.setItem(REVOKED_CLOUD_MARKERS_KEY, JSON.stringify(revokedMap));
+      for (let i = 0; i < updatedLocalHistory.length; i++) {
+        if (updatedLocalHistory[i].status === "approved") {
+          updatedLocalHistory[i] = {
+            ...updatedLocalHistory[i],
+            status: "cancelled",
+            revokedAt: cloudRevokedAt,
+          };
+          historyChanged = true;
+        }
+      }
+    }
+
+    if (historyChanged) {
+      await AsyncStorage.setItem(
+        USER_PURCHASE_HISTORY_KEY,
+        JSON.stringify(updatedLocalHistory.slice(0, 50)),
+      );
+    }
+
+    // 3. Check if Toki Pro is in its LAST 3 DAYS and send notification once per day!
+    if (Platform.OS === "android" && FocusLock?.getFocusSessionState && !superAdmin) {
+      const s = await FocusLock.getFocusSessionState();
+      const proExpiresAt = Number(s?.proExpiresAt ?? 0);
+      const now = Date.now();
+      const remainingMs = proExpiresAt - now;
+      if (s?.isPro && remainingMs > 0 && remainingMs <= THREE_DAYS_MS) {
+        const daysLeft = Math.max(1, Math.ceil(remainingMs / (24 * 60 * 60 * 1000)));
+        const todayIso = new Date().toISOString().split("T")[0];
+        const lastWarnDate = await AsyncStorage.getItem(PRO_EXPIRY_WARN_DATE_KEY);
+        if (lastWarnDate !== todayIso) {
+          await AsyncStorage.setItem(PRO_EXPIRY_WARN_DATE_KEY, todayIso);
+          const title = `👑 Toki Pro মেয়াদ আর মাত্র ${daysLeft} দিন বাকি!`;
+          const body = `আপনার Toki Pro সাবস্ক্রিপশন ${daysLeft} দিনের মধ্যে শেষ হবে। ৬ ঘণ্টা সেশন লক, ব্রেক সিস্টেম ও স্টাডি ইউটিউব চালু রাখতে রিনিউ করুন।`;
+          try {
+            await ensureNotificationChannelsAndPermissions();
+            await Notifications.scheduleNotificationAsync({
+              content: {
+                title,
+                body,
+                sound: "default",
+                data: { screen: "/(tabs)/profile" },
+              },
+              trigger: null,
+            });
+          } catch {}
+          await addInAppNotice({
+            id: `pro-exp-${todayIso}`,
+            title,
+            message: body,
+            timestamp: now,
+            read: false,
+            type: "system",
+          });
+        }
+      }
+    }
+  } catch {}
 }
 
 // ============================================================================
@@ -631,6 +924,8 @@ export async function clearAllLocalAccountData(
       "@focus_schedule_break_enabled",
       USER_PURCHASE_HISTORY_KEY,
       EXAM_COUNTDOWN_GOAL_KEY,
+      APPLIED_CLOUD_REQ_IDS_KEY,
+      PRO_EXPIRY_WARN_DATE_KEY,
       IN_APP_NOTICES_KEY,
       CACHED_USER_PROFILE_KEY,
       OFFLINE_SYNC_QUEUE_KEY,
@@ -730,6 +1025,14 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
       await AsyncStorage.setItem(ACTIVE_USER_ID_KEY, currentUser.id);
     }
 
+    // Sync pending/approved/cancelled requests from public.toki_cloud_store & check 3-day Pro expiry
+    await syncUserPurchasesAndProExpiryWithCloud(
+      currentUser.id,
+      currentUser.email || "",
+    );
+
+    const superAdmin = isSuperAdminEmail(currentUser.email);
+
     let [
       contactsRaw,
       statsRaw,
@@ -765,9 +1068,9 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
       ytUsedSeconds: 0,
       ytStudyUsedSeconds: 0,
       ytUsageDate: todayIso,
-      isPro: false,
-      proExpiresAt: 0,
-      proPlanName: "",
+      isPro: superAdmin,
+      proExpiresAt: superAdmin ? 4102444800000 : 0,
+      proPlanName: superAdmin ? "Super Admin Lifetime Pro 👑" : "",
     };
 
     if (Platform.OS === "android" && FocusLock?.getFocusSessionState) {
@@ -784,9 +1087,11 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
           ytUsedSeconds: s.ytUsedSeconds ?? 0,
           ytStudyUsedSeconds: s.ytStudyUsedSeconds ?? 0,
           ytUsageDate: s.ytUsageDate || todayIso,
-          isPro: !!s.isPro,
-          proExpiresAt: Number(s.proExpiresAt ?? 0),
-          proPlanName: s.proPlanName || "",
+          isPro: superAdmin || !!s.isPro,
+          proExpiresAt: superAdmin ? 4102444800000 : Number(s.proExpiresAt ?? 0),
+          proPlanName: superAdmin
+            ? "Super Admin Lifetime Pro 👑"
+            : s.proPlanName || "",
         };
       } catch {}
     }
@@ -842,18 +1147,25 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
     const cloudUsed = cloudBackup.totalPassesUsed ?? 0;
     const cloudLastDate = cloudBackup.lastCompletedDate || "";
     const cloudStreak = cloudBackup.streakDays ?? 0;
-    const cloudProExpiresAt = Number(cloudBackup.proExpiresAt ?? 0);
-    const cloudProPlanName = cloudBackup.proPlanName || "";
+    const cloudProExpiresAt = superAdmin
+      ? 4102444800000
+      : Number(cloudBackup.proExpiresAt ?? 0);
+    const cloudProPlanName = superAdmin
+      ? "Super Admin Lifetime Pro 👑"
+      : cloudBackup.proPlanName || "";
 
     const mergedEarned = Math.max(nativeLockState.totalPassesEarned, cloudEarned);
     const mergedUsed = Math.max(nativeLockState.totalPassesUsed, cloudUsed);
     const mergedPasses = Math.max(0, Math.min(15, mergedEarned - mergedUsed));
 
-    const mergedProExpiresAt = Math.max(nativeLockState.proExpiresAt, cloudProExpiresAt);
-    const mergedProPlanName =
-      cloudProExpiresAt >= nativeLockState.proExpiresAt && cloudProPlanName
-        ? cloudProPlanName
-        : nativeLockState.proPlanName;
+    const mergedProExpiresAt = superAdmin
+      ? 4102444800000
+      : Math.max(nativeLockState.proExpiresAt, cloudProExpiresAt);
+    const mergedProPlanName = superAdmin
+      ? "Super Admin Lifetime Pro 👑"
+      : cloudProExpiresAt >= nativeLockState.proExpiresAt && cloudProPlanName
+      ? cloudProPlanName
+      : nativeLockState.proPlanName;
 
     let mergedLastDate = nativeLockState.lastCompletedDate;
     let mergedStreak = nativeLockState.streakDays;
@@ -920,27 +1232,35 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
 
     // Merge 60-day purchase history
     const cutoff = Date.now() - SIXTY_DAYS_MS;
-    const localPurchases: PurchaseRecord[] = purchaseHistoryRaw ? JSON.parse(purchaseHistoryRaw) : [];
+    const localPurchases: PurchaseRecord[] = purchaseHistoryRaw
+      ? JSON.parse(purchaseHistoryRaw)
+      : [];
     const cloudPurchases: PurchaseRecord[] = Array.isArray(cloudBackup.purchaseHistory)
       ? cloudBackup.purchaseHistory
       : [];
     const mergedMap = new Map<string, PurchaseRecord>();
     [...cloudPurchases, ...localPurchases].forEach((p) => {
       if (p && p.id && (p.createdAt || 0) >= cutoff) {
-        mergedMap.set(p.id, p);
+        const prev = mergedMap.get(p.id);
+        if (!prev || p.status !== "pending") {
+          mergedMap.set(p.id, p);
+        }
       }
     });
     const mergedPurchaseHistory = Array.from(mergedMap.values()).sort(
       (a, b) => b.createdAt - a.createdAt,
     );
-    await AsyncStorage.setItem(USER_PURCHASE_HISTORY_KEY, JSON.stringify(mergedPurchaseHistory));
+    await AsyncStorage.setItem(
+      USER_PURCHASE_HISTORY_KEY,
+      JSON.stringify(mergedPurchaseHistory),
+    );
 
     const cachedRaw = await AsyncStorage.getItem(CACHED_USER_PROFILE_KEY);
     if (cachedRaw) {
       const cached: CachedUserProfile = JSON.parse(cachedRaw);
       cached.emergencyPasses = mergedPasses;
       cached.streakDays = mergedStreak;
-      cached.isPro = mergedProExpiresAt > Date.now();
+      cached.isPro = superAdmin || mergedProExpiresAt > Date.now();
       cached.proExpiresAt = mergedProExpiresAt;
       cached.proPlanName = mergedProPlanName;
       await AsyncStorage.setItem(
@@ -986,7 +1306,7 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
         lastCompletedDate: mergedLastDate,
         completedHistory: mergedHistoryObj,
         totalCompleted: mergedTotalCompleted,
-        isPro: mergedProExpiresAt > Date.now(),
+        isPro: superAdmin || mergedProExpiresAt > Date.now(),
         proExpiresAt: mergedProExpiresAt,
         proPlanName: mergedProPlanName,
         purchaseHistory: mergedPurchaseHistory,
@@ -1011,10 +1331,12 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
           data.user.user_metadata?.picture,
         emergencyPasses: mergedPasses,
         streakDays: mergedStreak,
-        isPro: mergedProExpiresAt > Date.now(),
+        isPro: superAdmin || mergedProExpiresAt > Date.now(),
         proExpiresAt: mergedProExpiresAt,
         proPlanName: mergedProPlanName,
-        accountCode: getAccountCodeForUser(data.user.id || data.user.email || "toki-user"),
+        accountCode: getAccountCodeForUser(
+          data.user.id || data.user.email || "toki-user",
+        ),
         lastSyncedAt: Date.now(),
       };
       await AsyncStorage.setItem(
@@ -1043,6 +1365,11 @@ export async function restoreCloudBackupAfterGoogleLogin(): Promise<void> {
       await clearAllLocalAccountData(user.id);
     }
 
+    if (Platform.OS === "android" && FocusLock?.setSuperAdminUserEmail && user.email) {
+      await FocusLock.setSuperAdminUserEmail(user.email);
+    }
+
+    const superAdmin = isSuperAdminEmail(user.email);
     const backup = user.user_metadata?.jnuits_backup_v2;
 
     if (backup) {
@@ -1062,7 +1389,9 @@ export async function restoreCloudBackupAfterGoogleLogin(): Promise<void> {
 
       if (Array.isArray(backup.purchaseHistory) && backup.purchaseHistory.length > 0) {
         const cutoff = Date.now() - SIXTY_DAYS_MS;
-        const validHistory = backup.purchaseHistory.filter((r: any) => (r.createdAt || 0) >= cutoff);
+        const validHistory = backup.purchaseHistory.filter(
+          (r: any) => (r.createdAt || 0) >= cutoff,
+        );
         await AsyncStorage.setItem(USER_PURCHASE_HISTORY_KEY, JSON.stringify(validHistory));
       }
 
@@ -1078,8 +1407,8 @@ export async function restoreCloudBackupAfterGoogleLogin(): Promise<void> {
           backup.ytUsageDate || "",
           backup.ytUsedSeconds ?? 0,
           backup.ytStudyUsedSeconds ?? 0,
-          Number(backup.proExpiresAt ?? 0),
-          backup.proPlanName || "",
+          superAdmin ? 4102444800000 : Number(backup.proExpiresAt ?? 0),
+          superAdmin ? "Super Admin Lifetime Pro 👑" : backup.proPlanName || "",
         );
       }
 

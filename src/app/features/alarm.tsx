@@ -340,18 +340,20 @@ export default function ModernAlarmScreen() {
           })}
         </Text>
 
-        <Pressable
-          onPress={testInstantAlarm}
-          className="mt-4 flex-row items-center bg-slate-700/50 px-4 py-2 rounded-full border border-slate-600 active:bg-slate-700"
-        >
-          <Ionicons name="flask-outline" size={16} color="#94A3B8" />
-          <Text
-            allowFontScaling={false}
-            className="ml-2 text-sm text-slate-300 font-semibold"
+        {__DEV__ && (
+          <Pressable
+            onPress={testInstantAlarm}
+            className="mt-4 flex-row items-center bg-slate-700/50 px-4 py-2 rounded-full border border-slate-600 active:bg-slate-700"
           >
-            Test Alarm (5s)
-          </Text>
-        </Pressable>
+            <Ionicons name="flask-outline" size={16} color="#94A3B8" />
+            <Text
+              allowFontScaling={false}
+              className="ml-2 text-sm text-slate-300 font-semibold"
+            >
+              Test Alarm (5s)
+            </Text>
+          </Pressable>
+        )}
       </View>
 
       {/* 🌟 ডায়নামিক Permissions Suggestion Box */}

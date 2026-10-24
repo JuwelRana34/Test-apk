@@ -38,8 +38,10 @@ import {
   addInAppNotice,
   getAccountCodeForUser,
   getAdminAppConfig,
+  PurchaseRecord,
   recordUserPurchaseHistory,
   spendEmergencyPassWithCloudCheck,
+  submitUserPaymentRequestToCloud,
   syncLocalDataToCloudIfOnline,
 } from "../../lib/supabase";
 
@@ -244,6 +246,9 @@ export default function StrictFocusScreen() {
   const [userEmail, setUserEmail] = useState("");
   const [adminConfig, setAdminConfig] = useState<AdminAppConfig | null>(null);
   const [activationKeyInput, setActivationKeyInput] = useState("");
+  const [lockTrxIdInput, setLockTrxIdInput] = useState("");
+  const [lockSenderPhoneInput, setLockSenderPhoneInput] = useState("");
+  const [submittingLockReq, setSubmittingLockReq] = useState(false);
 
   // Dual YouTube Quota State
   const [ytLimitMinutes, setYtLimitMinutes] = useState(30);
@@ -745,18 +750,61 @@ export default function StrictFocusScreen() {
     }
   };
 
-  const handleRequestPassOnWhatsApp = () => {
-    const waPhone = adminConfig?.whatsappNumber || "01761632836";
-    const cleanWa = waPhone.startsWith("88") ? waPhone : `88${waPhone}`;
-    const price1 = adminConfig?.prices?.pass1 ?? 19;
-    const price3 = adminConfig?.prices?.pass3 ?? 49;
-    const text = `আসসালামু আলাইকুম! আমি Toki অ্যাপের জন্য Emergency Pass কিনতে চাই।\n• আমার Account Code: ${accountCode}\n• Email: ${userEmail}\n• প্যাক: 1 Pass (৳${price1}) / 3 Passes (৳${price3})`;
-    void Linking.openURL(
-      `whatsapp://send?phone=${cleanWa}&text=${encodeURIComponent(text)}`,
-    );
+  const handleSubmitLockPassRequestInApp = async () => {
+    const trx = lockTrxIdInput.trim().toUpperCase();
+    const sender = lockSenderPhoneInput.trim();
+    if (!trx || !sender) {
+      showModernNotice(
+        "তথ্য দিন",
+        "অনুগ্রহ করে বিকাশ/নগদ TrxID এবং যে নাম্বার থেকে টাকা পাঠিয়েছেন তা লিখুন।",
+        "alert-circle-outline",
+        "#FBBF24",
+      );
+      return;
+    }
+    setSubmittingLockReq(true);
+    try {
+      const price1 = adminConfig?.prices?.pass1 ?? 19;
+      const newRec: PurchaseRecord = {
+        id: `req-${Date.now()}`,
+        userEmail: userEmail || "user@toki.app",
+        accountCode,
+        planType: "PASS1",
+        planTitle: "১টি ইনস্ট্যান্ট এমারজেন্সি পাস",
+        amountBdt: price1,
+        trxId: trx,
+        senderPhone: sender,
+        status: "pending",
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 60 * 86400000,
+      };
+      await submitUserPaymentRequestToCloud(newRec);
+      setLockTrxIdInput("");
+      setLockSenderPhoneInput("");
+      setEmergencyModalVisible(false);
+      showModernNotice(
+        "পেমেন্ট রিকোয়েস্ট জমা হয়েছে ✅",
+        "আপনার রিকোয়েস্ট অ্যাডমিনের প্যানেলে চলে গেছে! অ্যাডমিন Approve করলেই এই স্ক্রিনে স্ট্যাটাস রিফ্রেশ চাপলে পাস যুক্ত হয়ে যাবে।",
+        "check-decagram",
+        "#34D399",
+      );
+    } catch {
+      showModernNotice(
+        "ত্রুটি",
+        "রিকোয়েস্ট পাঠানো যায়নি। ইন্টারনেট সংযোগ চেক করুন।",
+        "alert-circle-outline",
+        "#F43F5E",
+      );
+    } finally {
+      setSubmittingLockReq(false);
+    }
   };
 
   const toggleScheduleBreak = async (val: boolean) => {
+    if (!isProUser) {
+      showProUpgradePrompt("শিডিউল লকে ৫০+১০ মিনিট অটো-ব্রেক সিস্টেম");
+      return;
+    }
     setScheduleBreakEnabledState(val);
     await AsyncStorage.setItem(
       "@focus_schedule_break_enabled",
@@ -1011,7 +1059,7 @@ export default function StrictFocusScreen() {
         parsedDuration,
         selectedApps,
         ytLimitMinutes,
-        pomodoroEnabled,
+        isProUser && pomodoroEnabled,
       );
 
       await AsyncStorage.setItem(
@@ -1351,8 +1399,9 @@ export default function StrictFocusScreen() {
   );
 
   const isCycleModeActive =
-    (lockMode === "SESSION" && pomodoroEnabled) ||
-    (lockMode === "SCHEDULE" && scheduleBreakEnabled);
+    isProUser &&
+    ((lockMode === "SESSION" && pomodoroEnabled) ||
+      (lockMode === "SCHEDULE" && scheduleBreakEnabled));
 
   const studyHoursText = (ytStudyLimitMinutes / 60)
     .toFixed(1)
@@ -1403,10 +1452,10 @@ export default function StrictFocusScreen() {
                 className="text-slate-200 font-bold text-[11px] ml-1.5"
               >
                 {lockMode === "SCHEDULE"
-                  ? scheduleBreakEnabled
+                  ? isProUser && scheduleBreakEnabled
                     ? "Schedule (50m / 10m)"
                     : "Schedule Lock"
-                  : pomodoroEnabled
+                  : isProUser && pomodoroEnabled
                     ? "Session (25m / 5m)"
                     : "Session Lock"}
               </Text>
@@ -1770,7 +1819,7 @@ export default function StrictFocusScreen() {
           </Pressable>
         </ScrollView>
 
-        {/* 🌟 Emergency Unlock OR Buy Instant Pass / Enter Key Modal */}
+        {/* 🌟 Emergency Unlock OR In-App Instant Pass Request / Enter Key Modal */}
         <Modal
           visible={emergencyModalVisible}
           transparent
@@ -1779,104 +1828,172 @@ export default function StrictFocusScreen() {
         >
           <KeyboardAvoidingView
             behavior={Platform.OS === "ios" ? "padding" : "height"}
-            className="flex-1 bg-black/85 justify-center items-center px-5"
+            className="flex-1 bg-black/85 justify-center items-center px-4"
           >
-            <View className="bg-[#131C31] w-full rounded-3xl p-5 border border-slate-700 items-center">
-              <View className="w-14 h-14 rounded-2xl bg-amber-500/20 border border-amber-500/40 items-center justify-center mb-3">
-                <MaterialCommunityIcons
-                  name="ticket-confirmation"
-                  size={28}
-                  color="#FBBF24"
-                />
-              </View>
-              <Text
-                allowFontScaling={false}
-                className="text-white font-black text-lg text-center mb-1.5"
+            <View className="bg-[#131C31] w-full max-h-[88%] rounded-3xl p-5 border border-slate-700">
+              <ScrollView
+                showsVerticalScrollIndicator={false}
+                keyboardShouldPersistTaps="handled"
               >
-                {emergencyPasses > 0
-                  ? "১টি Emergency Pass খরচ করবেন?"
-                  : "কোনো Emergency Pass জমা নেই!"}
-              </Text>
-              <Text
-                allowFontScaling={false}
-                className="text-slate-300 text-xs text-center leading-5 mb-4"
-              >
-                {emergencyPasses > 0
-                  ? `এখন লক ভাঙলে আপনার জমানো ${emergencyPasses}টি পাস থেকে ১টি পাস কেটে ক্লাউডে আপডেট করা হবে (বাকি থাকবে ${emergencyPasses - 1}টি)।`
-                  : `আপনার পাস সংখ্যা 0। এখনই জরুরি আনলক করতে চাইলে ৳${pass1Price} দিয়ে ১টি Instant Pass কিনুন অথবা নিচে আপনার Pass Activation Code বসান (Account Code: ${accountCode})।`}
-              </Text>
-
-              {emergencyPasses <= 0 && (
-                <View className="w-full mb-4">
-                  <View className="flex-row gap-2 mb-2.5">
-                    <TextInput
-                      placeholder="TK-PASS1-XXXXX-XXXXXXXX"
-                      placeholderTextColor="#64748B"
-                      value={activationKeyInput}
-                      onChangeText={setActivationKeyInput}
-                      autoCapitalize="characters"
-                      className="flex-1 bg-[#0B1120] text-white px-3.5 py-2.5 rounded-xl border border-slate-700 text-xs font-bold"
+                <View className="items-center">
+                  <View className="w-12 h-12 rounded-2xl bg-amber-500/20 border border-amber-500/40 items-center justify-center mb-2.5">
+                    <MaterialCommunityIcons
+                      name="ticket-confirmation"
+                      size={26}
+                      color="#FBBF24"
                     />
-                    <Pressable
-                      onPress={() => void handleApplyActivationKeyInFocus()}
-                      className="bg-emerald-600 px-4 rounded-xl items-center justify-center"
-                    >
-                      <Text
-                        allowFontScaling={false}
-                        className="text-white font-black text-xs"
-                      >
-                        Apply
-                      </Text>
-                    </Pressable>
                   </View>
-
-                  <Pressable
-                    onPress={handleRequestPassOnWhatsApp}
-                    className="w-full bg-emerald-500/20 border border-emerald-500/40 py-3 rounded-2xl flex-row items-center justify-center"
-                  >
-                    <Ionicons name="logo-whatsapp" size={16} color="#34D399" />
-                    <Text
-                      allowFontScaling={false}
-                      className="text-emerald-300 font-black text-xs ml-2"
-                    >
-                      WhatsApp-এ Instant Pass কিনুন (৳{pass1Price})
-                    </Text>
-                  </Pressable>
-                </View>
-              )}
-
-              <View className="flex-row gap-3 w-full">
-                <Pressable
-                  onPress={() => setEmergencyModalVisible(false)}
-                  disabled={spendingPass}
-                  className="flex-1 bg-slate-800 py-3.5 rounded-2xl items-center border border-slate-700"
-                >
                   <Text
                     allowFontScaling={false}
-                    className="text-white font-bold text-xs"
+                    className="text-white font-black text-base text-center mb-1"
                   >
-                    ফিরে যান
+                    {emergencyPasses > 0
+                      ? "১টি Emergency Pass খরচ করবেন?"
+                      : "ইনস্ট্যান্ট Emergency Pass অ্যাক্টিভেশন"}
                   </Text>
-                </Pressable>
-                {emergencyPasses > 0 && (
-                  <Pressable
-                    onPress={() => void handleEmergencyUnlockConfirm()}
-                    disabled={spendingPass}
-                    className="flex-1 bg-rose-600 py-3.5 rounded-2xl items-center justify-center"
+                  <Text
+                    allowFontScaling={false}
+                    className="text-slate-300 text-xs text-center leading-5 mb-3"
                   >
-                    {spendingPass ? (
-                      <ActivityIndicator size="small" color="#FFFFFF" />
-                    ) : (
+                    {emergencyPasses > 0
+                      ? `এখন লক ভাঙলে আপনার জমানো ${emergencyPasses}টি পাস থেকে ১টি পাস কেটে ক্লাউডে আপডেট করা হবে (বাকি থাকবে ${emergencyPasses - 1}টি)।`
+                      : `লক চলাকালীন জরুরি আনলক করতে ৳${pass1Price} বিকাশ/নগদ (${adminConfig?.bkashNagadNumber || "01761632836"}) করে নিচে ইন-অ্যাপ রিকোয়েস্ট সাবমিট করুন অথবা Pass Key বসান।`}
+                  </Text>
+                </View>
+
+                {emergencyPasses <= 0 && (
+                  <View className="w-full mb-3">
+                    <View className="bg-[#0B1120] px-3 py-2 rounded-xl border border-slate-800 mb-2.5 flex-row items-center justify-between">
                       <Text
                         allowFontScaling={false}
-                        className="text-white font-bold text-xs"
+                        className="text-sky-300 font-black text-[11px]"
                       >
-                        হ্যাঁ, ১টি পাস কাটুন
+                        Account Code: {accountCode}
                       </Text>
-                    )}
-                  </Pressable>
+                      <Pressable
+                        onPress={async () => {
+                          await syncLocalDataToCloudIfOnline();
+                          await refreshFocusSession();
+                        }}
+                        className="bg-indigo-600/30 border border-indigo-500/40 px-2.5 py-1 rounded-lg flex-row items-center"
+                      >
+                        <Feather name="refresh-cw" size={11} color="#818CF8" />
+                        <Text
+                          allowFontScaling={false}
+                          className="text-indigo-200 font-bold text-[10px] ml-1"
+                        >
+                          স্ট্যাটাস রিফ্রেশ
+                        </Text>
+                      </Pressable>
+                    </View>
+
+                    {/* 1. Redeem Activation Key Box */}
+                    <View className="flex-row gap-2 mb-3">
+                      <TextInput
+                        placeholder="TK-PASS1-XXXXX-XXXXXXXX"
+                        placeholderTextColor="#64748B"
+                        value={activationKeyInput}
+                        onChangeText={setActivationKeyInput}
+                        autoCapitalize="characters"
+                        className="flex-1 bg-[#0B1120] text-white px-3 py-2.5 rounded-xl border border-slate-700 text-xs font-bold"
+                      />
+                      <Pressable
+                        onPress={() => void handleApplyActivationKeyInFocus()}
+                        className="bg-emerald-600 px-3.5 rounded-xl items-center justify-center"
+                      >
+                        <Text
+                          allowFontScaling={false}
+                          className="text-white font-black text-xs"
+                        >
+                          Apply Key
+                        </Text>
+                      </Pressable>
+                    </View>
+
+                    {/* 2. In-App Payment Request Box (No WhatsApp needed during lock!) */}
+                    <View className="bg-[#0B1120] p-3 rounded-2xl border border-slate-800">
+                      <Text
+                        allowFontScaling={false}
+                        className="text-amber-300 font-bold text-[11px] mb-2"
+                      >
+                        💳 bKash/Nagad: {adminConfig?.bkashNagadNumber || "01761632836"} (১টি পাস ৳{pass1Price})
+                      </Text>
+                      <TextInput
+                        placeholder="বিকাশ/নগদ TrxID লিখুন"
+                        placeholderTextColor="#64748B"
+                        value={lockTrxIdInput}
+                        onChangeText={setLockTrxIdInput}
+                        autoCapitalize="characters"
+                        className="bg-[#131C31] text-white px-3 py-2 rounded-xl border border-slate-700 text-xs mb-2"
+                      />
+                      <TextInput
+                        placeholder="যে নাম্বার থেকে পাঠিয়েছেন (017XXXXXXXX)"
+                        placeholderTextColor="#64748B"
+                        value={lockSenderPhoneInput}
+                        onChangeText={setLockSenderPhoneInput}
+                        keyboardType="phone-pad"
+                        className="bg-[#131C31] text-white px-3 py-2 rounded-xl border border-slate-700 text-xs mb-2.5"
+                      />
+                      <Pressable
+                        onPress={() => void handleSubmitLockPassRequestInApp()}
+                        disabled={submittingLockReq}
+                        className="w-full bg-amber-500 py-2.5 rounded-xl flex-row items-center justify-center"
+                      >
+                        {submittingLockReq ? (
+                          <ActivityIndicator size="small" color="#0F172A" />
+                        ) : (
+                          <>
+                            <Ionicons
+                              name="checkmark-circle"
+                              size={16}
+                              color="#0F172A"
+                            />
+                            <Text
+                              allowFontScaling={false}
+                              className="text-slate-950 font-black text-xs ml-1.5"
+                            >
+                              শুধুমাত্র পেমেন্ট রিকোয়েস্ট সাবমিট করুন
+                            </Text>
+                          </>
+                        )}
+                      </Pressable>
+                    </View>
+                  </View>
                 )}
-              </View>
+
+                <View className="flex-row gap-3 w-full mt-1">
+                  <Pressable
+                    onPress={() => setEmergencyModalVisible(false)}
+                    disabled={spendingPass}
+                    className="flex-1 bg-slate-800 py-3 rounded-2xl items-center border border-slate-700"
+                  >
+                    <Text
+                      allowFontScaling={false}
+                      className="text-white font-bold text-xs"
+                    >
+                      ফিরে যান
+                    </Text>
+                  </Pressable>
+                  {emergencyPasses > 0 && (
+                    <Pressable
+                      onPress={() => void handleEmergencyUnlockConfirm()}
+                      disabled={spendingPass}
+                      className="flex-1 bg-rose-600 py-3 rounded-2xl items-center justify-center"
+                    >
+                      {spendingPass ? (
+                        <ActivityIndicator size="small" color="#FFFFFF" />
+                      ) : (
+                        <Text
+                          allowFontScaling={false}
+                          className="text-white font-bold text-xs"
+                        >
+                          হ্যাঁ, ১টি পাস কাটুন
+                        </Text>
+                      )}
+                    </Pressable>
+                  )}
+                </View>
+              </ScrollView>
             </View>
           </KeyboardAvoidingView>
         </Modal>
@@ -2190,7 +2307,7 @@ export default function StrictFocusScreen() {
             </Pressable>
           )}
 
-          {/* CARD 1: Session 25m Lock + 5m Break Cycle Bar */}
+          {/* CARD 1: Session 25m Lock + 5m Break Cycle Bar (Toki Pro Only!) */}
           <View className="bg-[#131C31] p-4 rounded-3xl border border-slate-800 flex-row items-center justify-between mb-4">
             <View className="flex-row items-center flex-1 pr-3">
               <View className="w-10 h-10 rounded-2xl bg-emerald-500/15 border border-emerald-500/30 items-center justify-center mr-3">
@@ -2201,23 +2318,43 @@ export default function StrictFocusScreen() {
                 />
               </View>
               <View className="flex-1">
-                <Text
-                  allowFontScaling={false}
-                  className="text-white font-bold text-sm"
-                >
-                  Session: 25m Lock + 5m Break
-                </Text>
+                <View className="flex-row items-center flex-wrap">
+                  <Text
+                    allowFontScaling={false}
+                    className="text-white font-bold text-sm"
+                  >
+                    Session: 25m Lock + 5m Break
+                  </Text>
+                  {!isProUser && (
+                    <View className="ml-2 bg-amber-500/20 border border-amber-500/40 px-2 py-0.5 rounded-full">
+                      <Text
+                        allowFontScaling={false}
+                        className="text-amber-300 font-black text-[9px]"
+                      >
+                        👑 PRO
+                      </Text>
+                    </View>
+                  )}
+                </View>
                 <Text
                   allowFontScaling={false}
                   className="text-slate-400 text-[11px] mt-0.5"
                 >
-                  প্রতি ২৫ মিনিট পর ৫ মিনিট ব্রেক (Reels/Shorts ব্লক থাকবে)
+                  {isProUser
+                    ? "প্রতি ২৫ মিনিট পর ৫ মিনিট ব্রেক (Reels/Shorts ব্লক থাকবে)"
+                    : "শুধুমাত্র Toki Pro ইউজাররা সেশন ও শিডিউলে ব্রেক সুবিধা পাবেন"}
                 </Text>
               </View>
             </View>
             <Switch
-              value={pomodoroEnabled}
-              onValueChange={setPomodoroEnabled}
+              value={isProUser && pomodoroEnabled}
+              onValueChange={(v) => {
+                if (!isProUser) {
+                  showProUpgradePrompt("সেশন লকে ২৫+৫ মিনিট অটো-ব্রেক সিস্টেম");
+                  return;
+                }
+                setPomodoroEnabled(v);
+              }}
               trackColor={{ false: "#334155", true: "#10B981" }}
               thumbColor="#FFFFFF"
             />
@@ -2396,7 +2533,7 @@ export default function StrictFocusScreen() {
               </Pressable>
             </View>
 
-            {/* Schedule 50m + 10m Break Toggle inside Card */}
+            {/* Schedule 50m + 10m Break Toggle inside Card (Toki Pro Only!) */}
             <View className="bg-[#0B1120] px-3.5 py-2.5 rounded-2xl border border-slate-800 flex-row items-center justify-between mb-2.5">
               <View className="flex-row items-center flex-1 pr-2">
                 <MaterialCommunityIcons
@@ -2406,13 +2543,14 @@ export default function StrictFocusScreen() {
                 />
                 <Text
                   allowFontScaling={false}
-                  className="text-slate-200 font-bold text-xs ml-2 flex-1"
+                  numberOfLines={1}
+                  className="text-slate-200 font-bold text-xs ml-2 flex-shrink"
                 >
-                  Schedule: 50m Lock + 10m Break
+                  Schedule: 50m Lock + 10m Break {isProUser ? "" : "👑"}
                 </Text>
               </View>
               <Switch
-                value={scheduleBreakEnabled}
+                value={isProUser && scheduleBreakEnabled}
                 onValueChange={(v) => void toggleScheduleBreak(v)}
                 trackColor={{ false: "#334155", true: "#10B981" }}
                 thumbColor="#FFFFFF"
@@ -2470,23 +2608,29 @@ export default function StrictFocusScreen() {
       </ScrollView>
 
       {/* ===================================================================== */}
-      {/* MODAL 1: TOP-LEFT PASS & 99-DAY STREAK INFO MODAL                     */}
+      {/* MODAL 1: TOP-LEFT PASS & 99-DAY STREAK INFO MODAL (OVERFLOW-PROOF!)   */}
       {/* ===================================================================== */}
-      <Modal visible={passInfoModalVisible} transparent animationType="fade">
-        <View className="flex-1 bg-black/80 justify-center items-center px-5">
-          <View className="bg-[#131C31] w-full rounded-3xl p-5 border border-slate-700">
+      <Modal
+        visible={passInfoModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setPassInfoModalVisible(false)}
+      >
+        <View className="flex-1 bg-black/80 justify-center items-center px-4">
+          <View className="bg-[#131C31] w-full max-w-[400px] rounded-3xl p-5 border border-slate-700">
             <View className="flex-row items-center justify-between mb-4">
-              <View className="flex-row items-center">
+              <View className="flex-row items-center flex-1 pr-2">
                 <MaterialCommunityIcons
                   name="crown"
-                  size={22}
+                  size={21}
                   color="#FBBF24"
                 />
                 <Text
                   allowFontScaling={false}
-                  className="text-white font-black text-lg ml-2"
+                  numberOfLines={1}
+                  className="text-white font-black text-base ml-2 flex-1"
                 >
-                  99-Day Streak & Emergency Pass
+                  99d Streak & Emergency Pass
                 </Text>
               </View>
               <Pressable
@@ -2497,24 +2641,25 @@ export default function StrictFocusScreen() {
               </Pressable>
             </View>
 
-            <View className="bg-[#0B1120] p-4 rounded-2xl border border-slate-800 mb-3">
+            <View className="bg-[#0B1120] p-3.5 rounded-2xl border border-slate-800 mb-3">
               <View className="flex-row justify-between items-center mb-2">
-                <View className="flex-row items-center">
+                <View className="flex-row items-center flex-1 pr-2">
                   <MaterialCommunityIcons
                     name="fire"
-                    size={17}
+                    size={16}
                     color="#34D399"
                   />
                   <Text
                     allowFontScaling={false}
-                    className="text-slate-200 font-bold text-xs ml-1.5"
+                    numberOfLines={1}
+                    className="text-slate-200 font-bold text-xs ml-1.5 flex-1"
                   >
-                    ৯৯ দিনের স্ট্রিক চ্যালেঞ্জ (7d Free Pro)
+                    ৯৯ দিনের চ্যালেঞ্জ (7d Free Pro)
                   </Text>
                 </View>
                 <Text
                   allowFontScaling={false}
-                  className="text-emerald-400 font-black text-sm"
+                  className="text-emerald-400 font-black text-xs"
                 >
                   {streakDays} / 99 দিন
                 </Text>
@@ -2529,25 +2674,27 @@ export default function StrictFocusScreen() {
               </View>
             </View>
 
-            <View className="bg-[#0B1120] p-4 rounded-2xl border border-slate-800 mb-4 flex-row items-center justify-between">
-              <View className="flex-row items-center">
+            <View className="bg-[#0B1120] p-3.5 rounded-2xl border border-slate-800 mb-4 flex-row items-center justify-between">
+              <View className="flex-row items-center flex-1 pr-2">
                 <MaterialCommunityIcons
                   name="ticket-confirmation"
                   size={18}
                   color="#FBBF24"
                 />
-                <View className="ml-2.5">
+                <View className="ml-2.5 flex-1">
                   <Text
                     allowFontScaling={false}
+                    numberOfLines={1}
                     className="text-white font-bold text-xs"
                   >
                     জমানো Emergency Pass: {emergencyPasses}টি
                   </Text>
                   <Text
                     allowFontScaling={false}
-                    className="text-slate-400 text-[10px]"
+                    numberOfLines={2}
+                    className="text-slate-400 text-[10px] mt-0.5 leading-3.5"
                   >
-                    ৬ মাস বা ১ বছরের Pro প্যাকে +1 পাস ফ্রি!
+                    ৬ মাস Pro-তে +১টি ও ১ বছর Pro-তে +২টি পাস ফ্রি!
                   </Text>
                 </View>
               </View>
@@ -2556,7 +2703,7 @@ export default function StrictFocusScreen() {
                   setPassInfoModalVisible(false);
                   router.push("/(tabs)/profile");
                 }}
-                className="bg-amber-500 px-3 py-1.5 rounded-xl"
+                className="bg-amber-500 px-3 py-2 rounded-xl ml-1"
               >
                 <Text
                   allowFontScaling={false}
@@ -2567,16 +2714,26 @@ export default function StrictFocusScreen() {
               </Pressable>
             </View>
 
-            <Text
-              allowFontScaling={false}
-              className="text-slate-300 text-xs leading-5 mb-4"
-            >
-              • প্রতিদিন কমপক্ষে ৪৫ মিনিটের Session বা Schedule লক পূর্ণ করলে ১
-              স্ট্রিক যোগ হবে।{"\n"}• টানা ৯৯ দিন স্ট্রিক পূর্ণ করলে ফ্রি ইউজাররা
-              পুরস্কার হিসেবে **৭ দিনের ফ্রি Toki Pro** পাবেন!{"\n"}• ৬ মাস বা ১
-              বছরের Pro সাবস্ক্রিপশন কিনলে ১টি ফ্রি পাস পাবেন, অথবা প্রোফাইল থেকে
-              আলাদাভাবে পাস (৳{pass1Price}) কিনতে পারবেন।
-            </Text>
+            <View className="bg-[#0B1120]/60 p-3 rounded-2xl border border-slate-800/80 mb-4 gap-y-1.5">
+              <Text
+                allowFontScaling={false}
+                className="text-slate-300 text-xs leading-4"
+              >
+                • প্রতিদিন কমপক্ষে ৪৫ মিনিটের Session বা Schedule লক পূর্ণ করলে ১ স্ট্রিক যোগ হবে।
+              </Text>
+              <Text
+                allowFontScaling={false}
+                className="text-slate-300 text-xs leading-4"
+              >
+                • টানা ৯৯ দিন স্ট্রিক পূর্ণ করলে পুরস্কার হিসেবে ৭ দিনের ফ্রি Toki Pro 👑 পাবেন!
+              </Text>
+              <Text
+                allowFontScaling={false}
+                className="text-slate-300 text-xs leading-4"
+              >
+                • ৬ মাস Pro-তে ১টি এবং ১ বছর VIP Pro-তে ২টি ফ্রি পাস পাবেন (অথবা প্রোফাইল থেকে আলাদা পাস কিনতে পারবেন)।
+              </Text>
+            </View>
 
             <Pressable
               onPress={() => setPassInfoModalVisible(false)}

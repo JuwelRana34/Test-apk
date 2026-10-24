@@ -3,7 +3,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as DocumentPicker from "expo-document-picker";
 import { useFocusEffect, useIsFocused, useRouter } from "expo-router";
 import { StatusBar } from "expo-status-bar";
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Image,
   KeyboardAvoidingView,
@@ -281,13 +281,32 @@ export default function HomePage() {
     } catch {}
   };
 
-  const examDaysRemaining = useMemo(() => {
+  const [goalNowMs, setGoalNowMs] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!examGoal?.targetDate) return;
+    const timer = setInterval(() => {
+      setGoalNowMs(Date.now());
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [examGoal?.targetDate]);
+
+  const examLiveCountdown = useMemo(() => {
     if (!examGoal?.targetDate) return null;
-    const target = new Date(`${examGoal.targetDate}T00:00:00`).getTime();
+    const target = new Date(`${examGoal.targetDate}T23:59:59`).getTime();
     if (isNaN(target)) return null;
-    const today = new Date().setHours(0, 0, 0, 0);
-    return Math.max(0, Math.ceil((target - today) / (24 * 60 * 60 * 1000)));
-  }, [examGoal]);
+    const diffSec = Math.max(0, Math.floor((target - goalNowMs) / 1000));
+    const days = Math.floor(diffSec / 86400);
+    const hours = Math.floor((diffSec % 86400) / 3600);
+    const mins = Math.floor((diffSec % 3600) / 60);
+    const secs = diffSec % 60;
+    return {
+      days: String(days).padStart(2, "0"),
+      hours: String(hours).padStart(2, "0"),
+      mins: String(mins).padStart(2, "0"),
+      secs: String(secs).padStart(2, "0"),
+    };
+  }, [examGoal, goalNowMs]);
 
   // Last 7 days mini focus strip
   const last7Days = useMemo(() => {
@@ -511,7 +530,7 @@ export default function HomePage() {
           </View>
         </View>
 
-        {/* 🌟 NEW: EXAM / GOAL COUNTDOWN WIDGET */}
+        {/* 🌟 LIVE EXAM / GOAL TIME COUNTDOWN WIDGET (Days : Hours : Mins : Secs) */}
         <View className="px-4 mt-4">
           <Pressable
             onPress={() => {
@@ -519,52 +538,75 @@ export default function HomePage() {
               setGoalDateInput(examGoal?.targetDate || "2026-12-01");
               setGoalModalVisible(true);
             }}
-            className="bg-[#131C31] border border-indigo-500/30 p-3.5 rounded-3xl flex-row items-center justify-between"
+            className="bg-[#131C31] border border-indigo-500/30 p-3.5 rounded-3xl"
           >
-            <View className="flex-row items-center flex-1 pr-2">
-              <View className="w-10 h-10 rounded-2xl bg-indigo-500/15 border border-indigo-500/30 items-center justify-center mr-3">
-                <MaterialCommunityIcons
-                  name="flag-checkered"
-                  size={20}
-                  color="#818CF8"
-                />
+            <View className="flex-row items-center justify-between">
+              <View className="flex-row items-center flex-1 pr-2">
+                <View className="w-10 h-10 rounded-2xl bg-indigo-500/15 border border-indigo-500/30 items-center justify-center mr-3">
+                  <MaterialCommunityIcons
+                    name="flag-checkered"
+                    size={20}
+                    color="#818CF8"
+                  />
+                </View>
+                <View className="flex-1">
+                  <Text
+                    allowFontScaling={false}
+                    numberOfLines={1}
+                    className="text-white font-black text-xs"
+                  >
+                    {examGoal?.title || "Set Your Next Exam / Target Goal"}
+                  </Text>
+                  <Text
+                    allowFontScaling={false}
+                    numberOfLines={1}
+                    className="text-slate-400 text-[11px] mt-0.5"
+                  >
+                    {examGoal?.targetDate
+                      ? `Target: ${examGoal.targetDate} • লাইভ কাউন্টডাউন চলছে`
+                      : "ট্যাপ করে আপনার পরবর্তী পরীক্ষার তারিখ সেট করুন"}
+                  </Text>
+                </View>
               </View>
-              <View className="flex-1">
+
+              <View className="bg-indigo-600/20 border border-indigo-500/40 px-2.5 py-1 rounded-xl">
                 <Text
                   allowFontScaling={false}
-                  numberOfLines={1}
-                  className="text-white font-black text-xs"
+                  className="text-indigo-300 font-black text-[10px]"
                 >
-                  {examGoal?.title || "Set Your Next Exam / Target Goal"}
-                </Text>
-                <Text
-                  allowFontScaling={false}
-                  numberOfLines={1}
-                  className="text-slate-400 text-[11px] mt-0.5"
-                >
-                  {examGoal?.targetDate
-                    ? `Target Date: ${examGoal.targetDate} (Tap to edit)`
-                    : "ট্যাপ করে আপনার পরবর্তী পরীক্ষার তারিখ সেট করুন"}
+                  {examLiveCountdown ? "Edit" : "+ Set Goal"}
                 </Text>
               </View>
             </View>
 
-            <View className="bg-indigo-600/20 border border-indigo-500/40 px-3 py-1.5 rounded-xl items-center">
-              <Text
-                allowFontScaling={false}
-                className="text-indigo-300 font-black text-xs"
-              >
-                {examDaysRemaining !== null ? `${examDaysRemaining}d` : "+ Set"}
-              </Text>
-              {examDaysRemaining !== null && (
-                <Text
-                  allowFontScaling={false}
-                  className="text-slate-400 text-[9px] font-bold"
-                >
-                  LEFT
-                </Text>
-              )}
-            </View>
+            {examLiveCountdown && (
+              <View className="flex-row items-center justify-between mt-3 pt-2.5 border-t border-slate-800/90 gap-2">
+                {[
+                  { val: examLiveCountdown.days, label: "দিন (Days)" },
+                  { val: examLiveCountdown.hours, label: "ঘণ্টা (Hrs)" },
+                  { val: examLiveCountdown.mins, label: "মিনিট (Min)" },
+                  { val: examLiveCountdown.secs, label: "সেকেন্ড (Sec)" },
+                ].map((unit, uIdx) => (
+                  <View
+                    key={uIdx}
+                    className="flex-1 bg-[#0B1120] border border-indigo-500/25 py-2 rounded-2xl items-center"
+                  >
+                    <Text
+                      allowFontScaling={false}
+                      className="text-indigo-300 font-black text-base tracking-wider"
+                    >
+                      {unit.val}
+                    </Text>
+                    <Text
+                      allowFontScaling={false}
+                      className="text-slate-400 text-[9px] font-bold mt-0.5"
+                    >
+                      {unit.label}
+                    </Text>
+                  </View>
+                ))}
+              </View>
+            )}
           </Pressable>
         </View>
 

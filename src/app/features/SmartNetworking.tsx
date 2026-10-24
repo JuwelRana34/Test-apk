@@ -631,38 +631,40 @@ export default function SmartNetworkingScreen() {
           </View>
 
           <View className="flex-row gap-2">
-            <Pressable
-              onPress={async () => {
-                const sample = todayDueContacts[0] || contacts[0];
-                const ok = await triggerInstantContactNotification(
-                  sample?.name,
-                  sample ? getCategoryConfig(sample.category).label : undefined,
-                );
-                if (!ok) {
-                  setUiModal({
-                    visible: true,
-                    title: "Notification Permission",
-                    message:
-                      "নোটিফিকেশন পাওয়ার জন্য ফোনের Notification Permission অন করুন।",
-                    icon: "bell-alert-outline",
-                    color: "#FBBF24",
-                  });
-                }
-              }}
-              className="bg-emerald-600/20 border border-emerald-500/40 h-10 px-2.5 items-center justify-center rounded-xl flex-row"
-            >
-              <MaterialCommunityIcons
-                name="bell-ring-outline"
-                size={15}
-                color="#34D399"
-              />
-              <Text
-                allowFontScaling={false}
-                className="text-emerald-300 font-bold text-xs ml-1"
+            {__DEV__ && (
+              <Pressable
+                onPress={async () => {
+                  const sample = todayDueContacts[0] || contacts[0];
+                  const ok = await triggerInstantContactNotification(
+                    sample?.name,
+                    sample ? getCategoryConfig(sample.category).label : undefined,
+                  );
+                  if (!ok) {
+                    setUiModal({
+                      visible: true,
+                      title: "Notification Permission",
+                      message:
+                        "নোটিফিকেশন পাওয়ার জন্য ফোনের Notification Permission অন করুন।",
+                      icon: "bell-alert-outline",
+                      color: "#FBBF24",
+                    });
+                  }
+                }}
+                className="bg-emerald-600/20 border border-emerald-500/40 h-10 px-2.5 items-center justify-center rounded-xl flex-row"
               >
-                Test
-              </Text>
-            </Pressable>
+                <MaterialCommunityIcons
+                  name="bell-ring-outline"
+                  size={15}
+                  color="#34D399"
+                />
+                <Text
+                  allowFontScaling={false}
+                  className="text-emerald-300 font-bold text-xs ml-1"
+                >
+                  Test
+                </Text>
+              </Pressable>
+            )}
 
             <Pressable
               onPress={() => void openContactPicker()}

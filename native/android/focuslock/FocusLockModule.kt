@@ -194,8 +194,10 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
                 return
             }
 
-            val cleanAcc = userAccountCode.trim().uppercase(Locale.US)
-            val cleanKey = keyString.trim().uppercase(Locale.US)
+            val argA = userAccountCode.trim().uppercase(Locale.US)
+            val argB = keyString.trim().uppercase(Locale.US)
+            val cleanAcc = if (argA.count { it == '-' } == 3 && argB.count { it == '-' } == 1) argB else argA
+            val cleanKey = if (argA.count { it == '-' } == 3 && argB.count { it == '-' } == 1) argA else argB
             val parts = cleanKey.split("-")
             if (parts.size != 4 || parts[0] != "TK") {
                 val errMap = WritableNativeMap().apply {
@@ -269,9 +271,9 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
                 "PRO365" -> {
                     val base = maxOf(now, currentProExpiry)
                     currentProExpiry = base + 365L * dayMillis
-                    // Yearly VIP Pro includes +1 Free Bonus Pass!
-                    currentEarned += 1
-                    planTitle = "Yearly VIP Pro (+1 Bonus Pass)"
+                    // Yearly VIP Pro includes +2 Free Bonus Passes!
+                    currentEarned += 2
+                    planTitle = "Yearly VIP Pro (+2 Bonus Passes)"
                     amountBdt = 349
                     editor.putBoolean("IS_PRO_USER", true)
                     editor.putLong("PRO_EXPIRES_AT", currentProExpiry)
@@ -361,9 +363,57 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
     }
 
     private fun isProActive(prefs: android.content.SharedPreferences): Boolean {
+        val activeEmail = (prefs.getString("ACTIVE_USER_EMAIL", "") ?: "").trim().lowercase(Locale.US)
+        if (activeEmail == "juwelrana3426@gmail.com") return true
         val proFlag = prefs.getBoolean("IS_PRO_USER", false)
         val expiresAt = prefs.getLong("PRO_EXPIRES_AT", 0L)
         return proFlag && expiresAt > System.currentTimeMillis()
+    }
+
+    @ReactMethod
+    fun setSuperAdminUserEmail(email: String, promise: Promise) {
+        try {
+            val clean = email.trim().lowercase(Locale.US)
+            val prefs = reactApplicationContext.getSharedPreferences("FocusModePrefs", Context.MODE_PRIVATE)
+            val editor = prefs.edit().putString("ACTIVE_USER_EMAIL", clean)
+            if (clean == "juwelrana3426@gmail.com") {
+                editor.putBoolean("IS_PRO_USER", true)
+                editor.putLong("PRO_EXPIRES_AT", 4102444800000L)
+                editor.putString("PRO_PLAN_NAME", "Super Admin Lifetime Pro 👑")
+            }
+            editor.commit()
+            promise.resolve(true)
+        } catch (e: Exception) {
+            promise.resolve(false)
+        }
+    }
+
+    @ReactMethod
+    fun revokeProSubscriptionNative(revokePassesCount: Int, promise: Promise) {
+        try {
+            val prefs = reactApplicationContext.getSharedPreferences("FocusModePrefs", Context.MODE_PRIVATE)
+            val activeEmail = (prefs.getString("ACTIVE_USER_EMAIL", "") ?: "").trim().lowercase(Locale.US)
+            if (activeEmail == "juwelrana3426@gmail.com") {
+                promise.resolve(false)
+                return
+            }
+            val currentEarned = prefs.getInt("TOTAL_PASSES_EARNED", prefs.getInt("EMERGENCY_PASSES", 0))
+            val currentUsed = prefs.getInt("TOTAL_PASSES_USED", 0)
+            val nextEarned = maxOf(currentUsed, currentEarned - maxOf(0, revokePassesCount))
+            val nextPasses = (nextEarned - currentUsed).coerceIn(0, 15)
+            prefs.edit()
+                .putBoolean("IS_PRO_USER", false)
+                .putLong("PRO_EXPIRES_AT", 0L)
+                .putString("PRO_PLAN_NAME", "Free")
+                .putBoolean("POMODORO_ENABLED", false)
+                .putBoolean("SCHEDULE_BREAK_ENABLED", false)
+                .putInt("TOTAL_PASSES_EARNED", nextEarned)
+                .putInt("EMERGENCY_PASSES", nextPasses)
+                .commit()
+            promise.resolve(true)
+        } catch (e: Exception) {
+            promise.resolve(false)
+        }
     }
 
     private fun saveAllowedAppsToPrefs(prefs: android.content.SharedPreferences, pkgSet: Set<String>) {
@@ -857,7 +907,7 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
             prefs.edit().apply {
                 putBoolean("IS_SESSION_ACTIVE", true)
                 putString("LOCK_MODE", "SESSION")
-                putBoolean("POMODORO_ENABLED", pomodoroEnabled)
+                putBoolean("POMODORO_ENABLED", pro && pomodoroEnabled)
                 putInt("YT_LIMIT_MINUTES", safeGeneralYtLimit)
                 putLong("SESSION_START_TIME", now)
                 putLong("SESSION_START_REALTIME", nowRealtime)
@@ -988,8 +1038,9 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
             val startTimeMillis = prefs.getLong("SESSION_START_TIME", 0L)
             val endTimeMillis = prefs.getLong("SESSION_END_TIME", 0L)
             val lockMode = prefs.getString("LOCK_MODE", "SESSION") ?: "SESSION"
-            val pomodoroEnabled = prefs.getBoolean("POMODORO_ENABLED", true)
-            val scheduleBreakEnabled = prefs.getBoolean("SCHEDULE_BREAK_ENABLED", true)
+            val proNow = isProActive(prefs)
+            val pomodoroEnabled = proNow && prefs.getBoolean("POMODORO_ENABLED", true)
+            val scheduleBreakEnabled = proNow && prefs.getBoolean("SCHEDULE_BREAK_ENABLED", true)
 
             var isBreakActive = false
             var cycleRemainingMillis = 0L
@@ -1031,9 +1082,11 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
             val streakDays = prefs.getInt("STREAK_DAYS", 0).coerceIn(0, 99)
             val totalCompleted = prefs.getInt("TOTAL_COMPLETED_SESSIONS", 0)
 
-            val proExpiresAt = prefs.getLong("PRO_EXPIRES_AT", 0L)
-            val isPro = prefs.getBoolean("IS_PRO_USER", false) && proExpiresAt > now
-            val proPlanName = prefs.getString("PRO_PLAN_NAME", "") ?: ""
+                        val activeEmail = (prefs.getString("ACTIVE_USER_EMAIL", "") ?: "").trim().lowercase(Locale.US)
+            val isSuperAdmin = activeEmail == "juwelrana3426@gmail.com"
+            val proExpiresAt = if (isSuperAdmin) 4102444800000L else prefs.getLong("PRO_EXPIRES_AT", 0L)
+            val isPro = isSuperAdmin || (prefs.getBoolean("IS_PRO_USER", false) && proExpiresAt > now)
+            val proPlanName = if (isSuperAdmin) "Super Admin Lifetime Pro 👑" else (prefs.getString("PRO_PLAN_NAME", "") ?: "")
 
             val todayStr = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
             val savedYtDate = prefs.getString("YT_USAGE_DATE", "") ?: ""

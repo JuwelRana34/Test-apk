@@ -125,23 +125,25 @@ export default function Notice() {
 
         {/* Row 2: 3 Clean Action Buttons */}
         <View className="flex-row items-center gap-2 mb-3">
-          <Pressable
-            onPress={() => void handleTestPushNotification()}
-            className="flex-1 bg-emerald-500/15 border border-emerald-500/40 py-2 px-2.5 rounded-xl flex-row items-center justify-center"
-          >
-            <MaterialCommunityIcons
-              name="bell-ring-outline"
-              size={14}
-              color="#34D399"
-            />
-            <Text
-              allowFontScaling={false}
-              numberOfLines={1}
-              className="font-bold text-xs text-emerald-300 ml-1.5"
+          {__DEV__ && (
+            <Pressable
+              onPress={() => void handleTestPushNotification()}
+              className="flex-1 bg-emerald-500/15 border border-emerald-500/40 py-2 px-2.5 rounded-xl flex-row items-center justify-center"
             >
-              Test Alert
-            </Text>
-          </Pressable>
+              <MaterialCommunityIcons
+                name="bell-ring-outline"
+                size={14}
+                color="#34D399"
+              />
+              <Text
+                allowFontScaling={false}
+                numberOfLines={1}
+                className="font-bold text-xs text-emerald-300 ml-1.5"
+              >
+                Test Alert
+              </Text>
+            </Pressable>
+          )}
 
           <Pressable
             onPress={() => void handleMarkAllRead()}
@@ -254,8 +256,7 @@ export default function Notice() {
             allowFontScaling={false}
             className="text-slate-400 text-xs text-center leading-5"
           >
-            ওপরের Test Alert বাটনে ট্যাপ করে কন্টাক্ট রিমাইন্ডার নোটিফিকেশন
-            পরীক্ষা করতে পারেন।
+            আপনার সব ফোকাস লক, প্রো রিমাইন্ডার এবং কন্টাক্ট অ্যালার্ট এখানে জমা থাকবে।
           </Text>
         </View>
       ) : (

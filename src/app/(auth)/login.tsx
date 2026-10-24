@@ -9,6 +9,8 @@ import {
   Image,
   ImageBackground,
   Modal,
+  NativeModules,
+  Platform,
   Pressable,
   ScrollView,
   Text,
@@ -43,12 +45,20 @@ export default function LoginScreen() {
     setGoogleLoading(true);
     try {
       await GoogleSignin.hasPlayServices();
+      try {
+        await GoogleSignin.signOut();
+      } catch {}
       const userInfo: any = await GoogleSignin.signIn();
       const idToken = userInfo?.idToken || userInfo?.data?.idToken;
       const gUser = userInfo?.user || userInfo?.data?.user;
 
       if (idToken) {
         if (gUser) {
+          if (Platform.OS === "android" && NativeModules.FocusLock?.setSuperAdminUserEmail && gUser.email) {
+            try {
+              await NativeModules.FocusLock.setSuperAdminUserEmail(gUser.email);
+            } catch {}
+          }
           await AsyncStorage.setItem(
             CACHED_USER_PROFILE_KEY,
             JSON.stringify({

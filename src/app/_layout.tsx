@@ -124,6 +124,10 @@ export default function RootLayout() {
       }
     });
 
+    const autoSyncTimer = setInterval(() => {
+      void syncLocalDataToCloudIfOnline();
+    }, 25000);
+
     const notifResponseSub =
       Notifications.addNotificationResponseReceivedListener((response) => {
         const targetScreen =
@@ -136,6 +140,7 @@ export default function RootLayout() {
       });
 
     return () => {
+      clearInterval(autoSyncTimer);
       appStateSub.remove();
       notifResponseSub.remove();
     };

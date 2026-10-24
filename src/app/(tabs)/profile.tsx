@@ -153,6 +153,8 @@ export default function ProfileScreen() {
   const [editPricePro365, setEditPricePro365] = useState('349');
   const [editPricePass1, setEditPricePass1] = useState('19');
   const [editPricePass3, setEditPricePass3] = useState('49');
+  const [editFreeTrialEnabled, setEditFreeTrialEnabled] = useState(true);
+  const [editMaxTrialUsersCap, setEditMaxTrialUsersCap] = useState('500');
   const [newAdminEmailInput, setNewAdminEmailInput] = useState('');
 
   // OTA Update Drafts
@@ -234,6 +236,8 @@ export default function ProfileScreen() {
       setEditPricePro365(String(cfg.prices.pro365));
       setEditPricePass1(String(cfg.prices.pass1));
       setEditPricePass3(String(cfg.prices.pass3));
+      setEditFreeTrialEnabled(cfg.freeTrialEnabled !== false);
+      setEditMaxTrialUsersCap(String(cfg.maxTrialUsersCap || cfg.maxEarlyUsersCap || 500));
       setEditOtaVersion(cfg.appUpdate.latestVersion || CURRENT_APP_VERSION);
       setEditOtaUrl(cfg.appUpdate.downloadUrl || '');
       setEditOtaNotes(cfg.appUpdate.releaseNotes || '');
@@ -690,6 +694,9 @@ export default function ProfileScreen() {
         ...adminConfig,
         whatsappNumber: editWhatsapp.trim() || '01761632836',
         bkashNagadNumber: editBkash.trim() || '01761632836',
+        freeTrialEnabled: editFreeTrialEnabled,
+        maxTrialUsersCap: Math.max(1, parseInt(editMaxTrialUsersCap, 10) || 500),
+        maxEarlyUsersCap: Math.max(1, parseInt(editMaxTrialUsersCap, 10) || 500),
         prices: {
           pro30: Math.max(1, parseInt(editPricePro30, 10) || 49),
           pro180: Math.max(1, parseInt(editPricePro180, 10) || 199),
@@ -2133,6 +2140,39 @@ export default function ProfileScreen() {
                       />
                     </View>
                   </View>
+
+                  <View style={[styles.divider, { marginVertical: 12 }]} />
+
+                  <Text allowFontScaling={false} style={styles.redeemTitle}>
+                    🎁 নতুন ইউজার ৭ দিনের ফ্রি Pro ট্রায়াল কন্ট্রোল
+                  </Text>
+                  <Text allowFontScaling={false} style={styles.redeemSub}>
+                    এখন পর্যন্ত ফ্রি ট্রায়াল নিয়েছে: {(adminConfig?.claimedTrialDeviceIds || []).length} / {editMaxTrialUsersCap} টি ডিভাইস (Hardware ID লকড)
+                  </Text>
+
+                  <TouchableOpacity
+                    style={styles.forceUpdateToggle}
+                    onPress={() => setEditFreeTrialEnabled(!editFreeTrialEnabled)}
+                  >
+                    <MaterialCommunityIcons
+                      name="gift-outline"
+                      size={18}
+                      color={editFreeTrialEnabled ? "#34D399" : "#94A3B8"}
+                    />
+                    <Text allowFontScaling={false} style={styles.forceUpdateText}>
+                      নতুন ইউজারদের অটো ৭ দিন ফ্রি Pro ট্রায়াল: {editFreeTrialEnabled ? "চালু আছে ✅" : "বন্ধ আছে 🚫"}
+                    </Text>
+                  </TouchableOpacity>
+
+                  <Text allowFontScaling={false} style={styles.inputLabel}>
+                    সর্বোচ্চ কতজন নতুন ইউজার অটো ৭ দিন ফ্রি ট্রায়াল পাবে (ডিফল্ট: 500):
+                  </Text>
+                  <TextInput
+                    style={styles.storeInput}
+                    value={editMaxTrialUsersCap}
+                    onChangeText={setEditMaxTrialUsersCap}
+                    keyboardType="numeric"
+                  />
 
                   <TouchableOpacity
                     style={styles.submitPaymentBtn}

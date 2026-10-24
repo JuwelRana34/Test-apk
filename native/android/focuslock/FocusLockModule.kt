@@ -302,6 +302,10 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
             }
 
             val updatedPasses = (currentEarned - currentUsed).coerceIn(0, 15)
+            if (currentProExpiry > now) {
+                editor.putString("PRO_SECURITY_SEAL", FocusScheduler.computeProSecuritySeal(reactApplicationContext, currentProExpiry))
+                editor.putLong("MAX_SEEN_WALL_TIME", now)
+            }
             editor
                 .putInt("TOTAL_PASSES_EARNED", currentEarned)
                 .putInt("EMERGENCY_PASSES", updatedPasses)
@@ -369,7 +373,131 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
         if (activeEmail == "juwelrana3426@gmail.com") return true
         val proFlag = prefs.getBoolean("IS_PRO_USER", false)
         val expiresAt = prefs.getLong("PRO_EXPIRES_AT", 0L)
-        return proFlag && expiresAt > System.currentTimeMillis()
+        if (!proFlag || expiresAt <= 0L) return false
+
+        val now = System.currentTimeMillis()
+        val maxSeen = prefs.getLong("MAX_SEEN_WALL_TIME", 0L)
+        if (maxSeen > 0L && now < maxSeen - 10 * 60 * 1000L) {
+            return false
+        }
+        if (now > maxSeen) {
+            prefs.edit().putLong("MAX_SEEN_WALL_TIME", now).apply()
+        }
+        if (now >= expiresAt) return false
+
+        val savedSeal = prefs.getString("PRO_SECURITY_SEAL", "") ?: ""
+        val expectedSeal = FocusScheduler.computeProSecuritySeal(reactApplicationContext, expiresAt)
+        if (savedSeal.isNotEmpty() && expectedSeal.isNotEmpty() && savedSeal != expectedSeal) {
+            return false
+        }
+        return true
+    }
+
+    @ReactMethod
+    fun getDeviceHardwareId(promise: Promise) {
+        try {
+            val androidId = Settings.Secure.getString(
+                reactApplicationContext.contentResolver,
+                Settings.Secure.ANDROID_ID
+            ) ?: "toki_unknown_device"
+            promise.resolve(androidId)
+        } catch (e: Exception) {
+            promise.resolve("toki_unknown_device")
+        }
+    }
+
+    @ReactMethod
+    fun activateWelcome7DayTrialNative(promise: Promise) {
+        try {
+            // Persistent device-level prefs (NEVER cleared on account switch or logout!)
+            val devicePrefs = reactApplicationContext.getSharedPreferences("TokiDeviceHardwarePrefs", Context.MODE_PRIVATE)
+            val alreadyClaimedOnDevice = devicePrefs.getBoolean("WELCOME_TRIAL_CLAIMED_ON_HARDWARE", false)
+            val androidId = Settings.Secure.getString(
+                reactApplicationContext.contentResolver,
+                Settings.Secure.ANDROID_ID
+            ) ?: "toki_unknown_device"
+
+            if (alreadyClaimedOnDevice) {
+                val res = WritableNativeMap().apply {
+                    putBoolean("granted", false)
+                    putString("deviceId", androidId)
+                    putString("reason", "ALREADY_CLAIMED_ON_DEVICE")
+                }
+                promise.resolve(res)
+                return
+            }
+
+            val prefs = reactApplicationContext.getSharedPreferences("FocusModePrefs", Context.MODE_PRIVATE)
+            val now = System.currentTimeMillis()
+            val trialExpiresAt = now + (7L * 24L * 60L * 60L * 1000L)
+            val seal = FocusScheduler.computeProSecuritySeal(reactApplicationContext, trialExpiresAt)
+
+            devicePrefs.edit()
+                .putBoolean("WELCOME_TRIAL_CLAIMED_ON_HARDWARE", true)
+                .putLong("WELCOME_TRIAL_CLAIMED_AT", now)
+                .commit()
+
+            prefs.edit()
+                .putBoolean("IS_PRO_USER", true)
+                .putLong("PRO_EXPIRES_AT", trialExpiresAt)
+                .putString("PRO_SECURITY_SEAL", seal)
+                .putLong("MAX_SEEN_WALL_TIME", now)
+                .putString("PRO_PLAN_NAME", "7-Day Welcome Free Pro 🎁")
+                .commit()
+
+            val res = WritableNativeMap().apply {
+                putBoolean("granted", true)
+                putString("deviceId", androidId)
+                putDouble("proExpiresAt", trialExpiresAt.toDouble())
+                putString("proPlanName", "7-Day Welcome Free Pro 🎁")
+            }
+            promise.resolve(res)
+        } catch (e: Exception) {
+            promise.reject("TRIAL_ERROR", e.message)
+        }
+    }
+
+    @ReactMethod
+    fun openEssentialApp(appType: String, promise: Promise) {
+        try {
+            val prefs = reactApplicationContext.getSharedPreferences("FocusModePrefs", Context.MODE_PRIVATE)
+            val now = System.currentTimeMillis()
+            prefs.edit().putLong("WHITELIST_GRACE_UNTIL", now + 2000L).commit()
+
+            val pm = reactApplicationContext.packageManager
+            when (appType.uppercase(Locale.US)) {
+                "PHONE" -> {
+                    val dialIntent = Intent(Intent.ACTION_DIAL).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    reactApplicationContext.startActivity(dialIntent)
+                    promise.resolve(true)
+                }
+                "BKASH" -> {
+                    val intent = pm.getLaunchIntentForPackage("com.bKash.customerapp")
+                    if (intent != null) {
+                        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        reactApplicationContext.startActivity(intent)
+                        promise.resolve(true)
+                    } else {
+                        promise.resolve(false)
+                    }
+                }
+                "NAGAD" -> {
+                    val intent = pm.getLaunchIntentForPackage("com.konasl.nagad")
+                    if (intent != null) {
+                        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        reactApplicationContext.startActivity(intent)
+                        promise.resolve(true)
+                    } else {
+                        promise.resolve(false)
+                    }
+                }
+                else -> promise.resolve(false)
+            }
+        } catch (e: Exception) {
+            promise.resolve(false)
+        }
     }
 
     @ReactMethod
@@ -434,9 +562,12 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
             }
             val expiryLong = if (isPro) proExpiresAt.toLong() else 0L
             val activeNow = isPro && expiryLong > System.currentTimeMillis()
+            val seal = if (activeNow) FocusScheduler.computeProSecuritySeal(reactApplicationContext, expiryLong) else ""
             val editor = prefs.edit()
                 .putBoolean("IS_PRO_USER", activeNow)
                 .putLong("PRO_EXPIRES_AT", if (activeNow) expiryLong else 0L)
+                .putString("PRO_SECURITY_SEAL", seal)
+                .putLong("MAX_SEEN_WALL_TIME", System.currentTimeMillis())
                 .putString("PRO_PLAN_NAME", if (activeNow) proPlanName else "Free")
             if (!activeNow) {
                 editor.putBoolean("POMODORO_ENABLED", false)
@@ -449,9 +580,22 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
         }
     }
 
+    private fun isEssentialDefaultPkg(pkg: String): Boolean {
+        val lower = pkg.trim().lowercase(Locale.US)
+        return lower == "com.bkash.customerapp" ||
+            lower == "com.konasl.nagad" ||
+            lower.contains("dialer") ||
+            lower.contains("incallui") ||
+            lower == "com.android.phone" ||
+            lower == "com.google.android.dialer" ||
+            lower == "com.samsung.android.dialer" ||
+            lower == "com.truecaller"
+    }
+
     private fun saveAllowedAppsToPrefs(prefs: android.content.SharedPreferences, pkgSet: Set<String>) {
         val maxAllowed = if (isProActive(prefs)) 6 else 2
-        val limitedSet = pkgSet.take(maxAllowed).toSet()
+        val filteredUserSet = pkgSet.filter { !isEssentialDefaultPkg(it) }
+        val limitedSet = filteredUserSet.take(maxAllowed).toSet()
         prefs.edit().remove("ALLOWED_APPS").apply()
         prefs.edit()
             .putStringSet("ALLOWED_APPS", HashSet(limitedSet))
@@ -775,8 +919,9 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
 
             prefs.edit()
                 .putString("LAST_LAUNCHED_ALLOWED_APP", ytPkg)
-                .putLong("WHITELIST_GRACE_UNTIL", now + 1500L)
-                .putLong("LAST_LAUNCHED_STUDY_YT_UNTIL", now + 6000L)
+                .putLong("WHITELIST_GRACE_UNTIL", now + 2000L)
+                .putLong("LAST_LAUNCHED_STUDY_YT_UNTIL", now + 20000L)
+                .putBoolean("STUDY_SESSION_STICKY_ACTIVE", true)
                 .commit()
 
             reactApplicationContext.sendBroadcast(
@@ -1143,7 +1288,7 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
                         val activeEmail = (prefs.getString("ACTIVE_USER_EMAIL", "") ?: "").trim().lowercase(Locale.US)
             val isSuperAdmin = activeEmail == "juwelrana3426@gmail.com"
             val proExpiresAt = if (isSuperAdmin) 4102444800000L else prefs.getLong("PRO_EXPIRES_AT", 0L)
-            val isPro = isSuperAdmin || (prefs.getBoolean("IS_PRO_USER", false) && proExpiresAt > now)
+            val isPro = isProActive(prefs)
             val proPlanName = if (isSuperAdmin) "Super Admin Lifetime Pro 👑" else (prefs.getString("PRO_PLAN_NAME", "") ?: "")
 
             val todayStr = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
@@ -1349,6 +1494,8 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
                 .putInt("TOTAL_COMPLETED_SESSIONS", mergedTotalCompleted)
                 .putBoolean("IS_PRO_USER", isProActiveNow)
                 .putLong("PRO_EXPIRES_AT", mergedProExpiry)
+                .putString("PRO_SECURITY_SEAL", if (isProActiveNow) FocusScheduler.computeProSecuritySeal(reactApplicationContext, mergedProExpiry) else "")
+                .putLong("MAX_SEEN_WALL_TIME", System.currentTimeMillis())
                 .putString("PRO_PLAN_NAME", mergedProPlan)
                 .putString("LAST_COMPLETED_DATE", mergedLastDate)
                 .putString("COMPLETED_HISTORY_JSON", mergedHistory.toString())

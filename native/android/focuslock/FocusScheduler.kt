@@ -11,6 +11,7 @@ import android.provider.Settings
 import android.widget.Toast
 import org.json.JSONArray
 import org.json.JSONObject
+import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -24,6 +25,22 @@ object FocusScheduler {
     const val MAX_SCHEDULE_DURATION_MILLIS = 15 * 60 * 60 * 1000L
     const val STREAK_TARGET_DAYS = 99
     private const val REWARD_PRO_DAYS_MILLIS = 7L * 24L * 60L * 60L * 1000L
+
+    fun computeProSecuritySeal(context: Context, expiresAt: Long): String {
+        if (expiresAt <= 0L) return ""
+        return try {
+            val androidId = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID) ?: "toki_dev"
+            val raw = "$expiresAt|$androidId|TokiProSeal2026"
+            val digest = MessageDigest.getInstance("SHA-256").digest(raw.toByteArray(Charsets.UTF_8))
+            val sb = StringBuilder()
+            for (i in 0 until 8) {
+                sb.append(String.format("%02X", digest[i]))
+            }
+            sb.toString()
+        } catch (_: Exception) {
+            ""
+        }
+    }
 
     @Synchronized
     fun recordSuccessfulLockDay(context: Context, completedDurationMillis: Long) {
@@ -113,6 +130,8 @@ object FocusScheduler {
 
             editor.putBoolean("IS_PRO_USER", true)
             editor.putLong("PRO_EXPIRES_AT", newExpiry)
+            editor.putString("PRO_SECURITY_SEAL", computeProSecuritySeal(context, newExpiry))
+            editor.putLong("MAX_SEEN_WALL_TIME", now)
             editor.putString("PRO_PLAN_NAME", "99-Day Streak Reward (7 Days Free Pro)")
             currentStreak = 0
             unlockedSevenDayPro = true

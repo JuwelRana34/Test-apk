@@ -32,6 +32,7 @@ export const EXAM_COUNTDOWN_GOAL_KEY = "@toki_exam_countdown_goal_v2";
 export const APPLIED_CLOUD_REQ_IDS_KEY = "@toki_applied_cloud_req_ids_v2";
 export const REVOKED_CLOUD_MARKERS_KEY = "@toki_revoked_cloud_markers_v2";
 export const PRO_EXPIRY_WARN_DATE_KEY = "@toki_pro_expiry_warn_date_v2";
+export const DEVICE_TRIAL_CLAIMED_KEY = "@toki_device_trial_claimed_v2";
 const GLOBAL_STORE_ROW_ID = "global_admin_store_v2";
 const SIXTY_DAYS_MS = 60 * 24 * 60 * 60 * 1000;
 const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
@@ -66,6 +67,10 @@ export interface AdminAppConfig {
   bkashNagadNumber: string;
   adminEmails: string[];
   maxEarlyUsersCap: number;
+  freeTrialEnabled?: boolean;
+  maxTrialUsersCap?: number;
+  claimedTrialDeviceIds?: string[];
+  claimedTrialEmails?: string[];
   prices: {
     pro30: number;
     pro180: number;
@@ -81,13 +86,18 @@ export interface AdminAppConfig {
   };
   salesHistory?: PurchaseRecord[];
   revokedAccounts?: Record<string, number>; // accountCode -> revokedTimestamp
+  revokedBonusPasses?: Record<string, number>; // accountCode -> bonusPassesToDeduct
 }
 
 export const DEFAULT_ADMIN_CONFIG: AdminAppConfig = {
   whatsappNumber: "01761632836",
   bkashNagadNumber: "01761632836",
   adminEmails: [SUPER_ADMIN_EMAIL],
-  maxEarlyUsersCap: 400,
+  maxEarlyUsersCap: 500,
+  freeTrialEnabled: true,
+  maxTrialUsersCap: 500,
+  claimedTrialDeviceIds: [],
+  claimedTrialEmails: [],
   prices: {
     pro30: 49,
     pro180: 199,
@@ -98,11 +108,12 @@ export const DEFAULT_ADMIN_CONFIG: AdminAppConfig = {
   appUpdate: {
     latestVersion: CURRENT_APP_VERSION,
     downloadUrl: "",
-    releaseNotes: "Toki v2.1.0 👑 — নিখুঁত গিটহাব গ্রাফ, স্টাডি ইউটিউব ফিক্স এবং স্মার্ট ক্লাউড সিঙ্ক!",
+    releaseNotes: "Toki v2.1.0 👑 — ৭ দিনের ফ্রি ট্রায়াল, নিখুঁত গিটহাব গ্রাফ, স্টাডি ইউটিউব ফিক্স এবং স্মার্ট ক্লাউড সিঙ্ক!",
     forceUpdate: false,
   },
   salesHistory: [],
   revokedAccounts: {},
+  revokedBonusPasses: {},
 };
 
 export function getPlanDurationMs(
@@ -117,6 +128,25 @@ export function getPlanDurationMs(
       return 365 * DAY_MS;
     default:
       return 60 * DAY_MS;
+  }
+}
+
+export function getPlanBonusPasses(
+  planType: "PRO30" | "PRO180" | "PRO365" | "PASS1" | "PASS3",
+): number {
+  switch (planType) {
+    case "PRO30":
+      return 0;
+    case "PRO180":
+      return 1;
+    case "PRO365":
+      return 2;
+    case "PASS1":
+      return 1;
+    case "PASS3":
+      return 3;
+    default:
+      return 0;
   }
 }
 
@@ -178,7 +208,6 @@ export async function saveExamCountdownGoal(goal: ExamCountdownGoal): Promise<vo
 
 /**
  * Fetches Global Admin Config & Shared Sales Requests from public.toki_cloud_store
- * Uses smart caching so Supabase Free Tier is never spammed!
  */
 export async function getAdminAppConfig(
   forceCloudFetch: boolean = false,
@@ -194,6 +223,13 @@ export async function getAdminAppConfig(
         prices: { ...DEFAULT_ADMIN_CONFIG.prices, ...(parsed.prices || {}) },
         appUpdate: { ...DEFAULT_ADMIN_CONFIG.appUpdate, ...(parsed.appUpdate || {}) },
         revokedAccounts: { ...(parsed.revokedAccounts || {}) },
+        revokedBonusPasses: { ...(parsed.revokedBonusPasses || {}) },
+        claimedTrialDeviceIds: Array.isArray(parsed.claimedTrialDeviceIds)
+          ? parsed.claimedTrialDeviceIds
+          : [],
+        claimedTrialEmails: Array.isArray(parsed.claimedTrialEmails)
+          ? parsed.claimedTrialEmails
+          : [],
       };
     }
   } catch {}
@@ -214,13 +250,25 @@ export async function getAdminAppConfig(
         lastGlobalStoreFetchAt = now;
         const cloudCfg = rowData.payload as Partial<AdminAppConfig>;
         const mergedSalesMap = new Map<string, PurchaseRecord>();
-        // Cloud status always takes precedence over local status!
         [...(localCfg.salesHistory || []), ...(cloudCfg.salesHistory || [])].forEach(
           (item) => {
             if (item && item.id) {
               mergedSalesMap.set(item.id, item);
             }
           },
+        );
+
+        const mergedDevices = Array.from(
+          new Set([
+            ...(localCfg.claimedTrialDeviceIds || []),
+            ...(cloudCfg.claimedTrialDeviceIds || []),
+          ]),
+        );
+        const mergedEmails = Array.from(
+          new Set([
+            ...(localCfg.claimedTrialEmails || []),
+            ...(cloudCfg.claimedTrialEmails || []),
+          ]),
         );
 
         localCfg = {
@@ -235,6 +283,12 @@ export async function getAdminAppConfig(
             ...(localCfg.revokedAccounts || {}),
             ...(cloudCfg.revokedAccounts || {}),
           },
+          revokedBonusPasses: {
+            ...(localCfg.revokedBonusPasses || {}),
+            ...(cloudCfg.revokedBonusPasses || {}),
+          },
+          claimedTrialDeviceIds: mergedDevices,
+          claimedTrialEmails: mergedEmails,
         };
       }
     } catch {}
@@ -271,6 +325,9 @@ export async function saveAdminAppConfig(cfg: AdminAppConfig): Promise<boolean> 
       adminEmails: Array.from(new Set([SUPER_ADMIN_EMAIL, ...(cfg.adminEmails || [])])),
       salesHistory: prunedSales,
       revokedAccounts: cfg.revokedAccounts || {},
+      revokedBonusPasses: cfg.revokedBonusPasses || {},
+      claimedTrialDeviceIds: Array.from(new Set(cfg.claimedTrialDeviceIds || [])),
+      claimedTrialEmails: Array.from(new Set(cfg.claimedTrialEmails || [])),
     };
     await AsyncStorage.setItem(ADMIN_APP_CONFIG_KEY, JSON.stringify(cleanCfg));
 
@@ -292,9 +349,6 @@ export async function saveAdminAppConfig(cfg: AdminAppConfig): Promise<boolean> 
   }
 }
 
-/**
- * Called by User when submitting a payment request (In-App or with WhatsApp)
- */
 export async function submitUserPaymentRequestToCloud(
   record: PurchaseRecord,
 ): Promise<boolean> {
@@ -316,10 +370,6 @@ export async function submitUserPaymentRequestToCloud(
   }
 }
 
-/**
- * Called by Admin when clicking "Approve / Active করুন"
- * Deterministic expiry calculation: NEVER doubles duration if clicked again on an existing request!
- */
 export async function adminApprovePaymentRequestInCloud(
   reqId: string,
   generatedKey: string,
@@ -332,7 +382,6 @@ export async function adminApprovePaymentRequestInCloud(
     const updatedSales = (currentCfg.salesHistory || []).map((item) => {
       if (item.id === reqId) {
         approvedAccCode = item.accountCode.toUpperCase();
-        // Fixed approval timestamp so re-approving the same request NEVER doubles the duration!
         const baseTime = item.approvedAt || item.createdAt || now;
         const fixedExpiresAt = baseTime + getPlanDurationMs(item.planType);
         return {
@@ -346,16 +395,18 @@ export async function adminApprovePaymentRequestInCloud(
       return item;
     });
 
-    // Clear any older revocation marker for this account if Admin is explicitly approving
     const nextRevoked = { ...(currentCfg.revokedAccounts || {}) };
-    if (approvedAccCode && nextRevoked[approvedAccCode]) {
+    const nextRevokedPasses = { ...(currentCfg.revokedBonusPasses || {}) };
+    if (approvedAccCode) {
       delete nextRevoked[approvedAccCode];
+      delete nextRevokedPasses[approvedAccCode];
     }
 
     const nextCfg: AdminAppConfig = {
       ...currentCfg,
       salesHistory: updatedSales,
       revokedAccounts: nextRevoked,
+      revokedBonusPasses: nextRevokedPasses,
     };
     return await saveAdminAppConfig(nextCfg);
   } catch {
@@ -364,7 +415,8 @@ export async function adminApprovePaymentRequestInCloud(
 }
 
 /**
- * Called by Admin when clicking "Cancel / Revoke" on a request or Account Code
+ * Called by Admin when clicking "Cancel / Revoke" on a request or Account Code.
+ * Deducts ONLY the bonus passes of that specific cancelled package (never wipes user's prior passes)!
  */
 export async function adminCancelOrRevokePurchaseInCloud(
   reqIdOrAccountCode: string,
@@ -374,6 +426,7 @@ export async function adminCancelOrRevokePurchaseInCloud(
     const currentCfg = await getAdminAppConfig(true);
     const now = Date.now();
     let targetAccCode = cleanTarget.toUpperCase();
+    let bonusPassesToDeduct = 0;
 
     const updatedSales = (currentCfg.salesHistory || []).map((item) => {
       if (
@@ -381,6 +434,9 @@ export async function adminCancelOrRevokePurchaseInCloud(
         item.accountCode.toUpperCase() === cleanTarget.toUpperCase()
       ) {
         targetAccCode = item.accountCode.toUpperCase();
+        if (item.status === "approved") {
+          bonusPassesToDeduct += getPlanBonusPasses(item.planType);
+        }
         return {
           ...item,
           status: "cancelled" as const,
@@ -395,11 +451,16 @@ export async function adminCancelOrRevokePurchaseInCloud(
       ...(currentCfg.revokedAccounts || {}),
       [targetAccCode]: now,
     };
+    const nextRevokedPasses = {
+      ...(currentCfg.revokedBonusPasses || {}),
+      [targetAccCode]: bonusPassesToDeduct,
+    };
 
     const nextCfg: AdminAppConfig = {
       ...currentCfg,
       salesHistory: updatedSales,
       revokedAccounts: nextRevoked,
+      revokedBonusPasses: nextRevokedPasses,
     };
     return await saveAdminAppConfig(nextCfg);
   } catch {
@@ -450,8 +511,8 @@ export async function recordUserPurchaseHistory(
 }
 
 /**
- * Synchronizes User's Pending/Approved/Cancelled Requests with Global Cloud Store
- * Returns { isRevokedNow, authoritativeProExpiry, authoritativeProPlan } so cancelled subscriptions stay cancelled!
+ * Synchronizes User's Pending/Approved/Cancelled Requests, 1-Time 7-Day Welcome Trial (Hardware ID Locked & 500 User Cap),
+ * and 3-Day Pro Expiry Warning!
  */
 export async function syncUserPurchasesAndProExpiryWithCloud(
   userId: string,
@@ -468,16 +529,91 @@ export async function syncUserPurchasesAndProExpiryWithCloud(
 
   try {
     const accountCode = getAccountCodeForUser(userId || userEmail);
-    const superAdmin = isSuperAdminEmail(userEmail);
+    const cleanEmail = (userEmail || "").trim().toLowerCase();
+    const superAdmin = isSuperAdminEmail(cleanEmail);
 
-    if (Platform.OS === "android" && FocusLock?.setSuperAdminUserEmail && userEmail) {
-      await FocusLock.setSuperAdminUserEmail(userEmail);
+    if (Platform.OS === "android" && FocusLock?.setSuperAdminUserEmail && cleanEmail) {
+      await FocusLock.setSuperAdminUserEmail(cleanEmail);
     }
 
     const localHistory = await getUserPurchaseHistory();
     const hasPendingLocal = localHistory.some((r) => r.status === "pending");
+    const localDeviceTrialClaimed = await AsyncStorage.getItem(DEVICE_TRIAL_CLAIMED_KEY);
 
-    const cfg = await getAdminAppConfig(forceCloudCheck || hasPendingLocal);
+    const cfg = await getAdminAppConfig(
+      forceCloudCheck || hasPendingLocal || !localDeviceTrialClaimed,
+    );
+
+    // 🌟 1. Check & Grant 1-Time 7-Day Welcome Free Pro Trial for New Users (Hardware Device ID Locked + 500 User Cap!)
+    if (!superAdmin && Platform.OS === "android" && FocusLock?.getDeviceHardwareId) {
+      try {
+        const deviceId: string = await FocusLock.getDeviceHardwareId();
+        const claimedDevices = cfg.claimedTrialDeviceIds || [];
+        const claimedEmails = cfg.claimedTrialEmails || [];
+        const trialEnabled = cfg.freeTrialEnabled !== false;
+        const maxTrialCap = cfg.maxTrialUsersCap || cfg.maxEarlyUsersCap || 500;
+
+        const isDeviceAlreadyUsed =
+          localDeviceTrialClaimed === "true" ||
+          (deviceId && claimedDevices.includes(deviceId));
+        const isEmailAlreadyUsed =
+          cleanEmail.length > 0 && claimedEmails.includes(cleanEmail);
+
+        if (isDeviceAlreadyUsed || isEmailAlreadyUsed) {
+          if (localDeviceTrialClaimed !== "true") {
+            await AsyncStorage.setItem(DEVICE_TRIAL_CLAIMED_KEY, "true");
+          }
+        } else if (
+          trialEnabled &&
+          claimedDevices.length < maxTrialCap &&
+          FocusLock?.activateWelcome7DayTrialNative
+        ) {
+          const trialRes = await FocusLock.activateWelcome7DayTrialNative();
+          await AsyncStorage.setItem(DEVICE_TRIAL_CLAIMED_KEY, "true");
+
+          const nextCfg: AdminAppConfig = {
+            ...cfg,
+            claimedTrialDeviceIds: Array.from(
+              new Set([...claimedDevices, deviceId]),
+            ),
+            claimedTrialEmails: cleanEmail
+              ? Array.from(new Set([...claimedEmails, cleanEmail]))
+              : claimedEmails,
+          };
+          await saveAdminAppConfig(nextCfg);
+
+          if (trialRes?.granted) {
+            const trialExp = Number(trialRes.proExpiresAt || Date.now() + 7 * DAY_MS);
+            authoritativeProExpiry = trialExp;
+            authoritativeProPlan = "7-Day Welcome Free Pro 🎁";
+
+            const welcomeTitle = "🎁 অভিনন্দন! ৭ দিনের ফ্রি Toki Pro চালু হয়েছে!";
+            const welcomeBody =
+              "নতুন ইউজার হিসেবে আপনি ৭ দিনের জন্য সব প্রো ফিচার (৬ ঘণ্টা সেশন লক, ২৫+৫ ব্রেক, ৩.৫ ঘণ্টা স্টাডি ইউটিউব ও PDF Reader) সম্পূর্ণ ফ্রিতে পেয়েছেন!";
+            try {
+              await ensureNotificationChannelsAndPermissions();
+              await Notifications.scheduleNotificationAsync({
+                content: {
+                  title: welcomeTitle,
+                  body: welcomeBody,
+                  sound: "default",
+                  data: { screen: "/(tabs)/profile" },
+                },
+                trigger: null,
+              });
+            } catch {}
+            await addInAppNotice({
+              id: `welcome-trial-${deviceId}`,
+              title: welcomeTitle,
+              message: welcomeBody,
+              timestamp: Date.now(),
+              read: false,
+              type: "system",
+            });
+          }
+        }
+      } catch {}
+    }
 
     const appliedRaw = await AsyncStorage.getItem(APPLIED_CLOUD_REQ_IDS_KEY);
     const appliedIds: string[] = appliedRaw ? JSON.parse(appliedRaw) : [];
@@ -491,10 +627,11 @@ export async function syncUserPurchasesAndProExpiryWithCloud(
     const userGlobalReqs = (cfg.salesHistory || []).filter(
       (r) =>
         r.accountCode?.toUpperCase() === accountCode.toUpperCase() ||
-        (userEmail && r.userEmail?.toLowerCase() === userEmail.toLowerCase()),
+        (cleanEmail && r.userEmail?.toLowerCase() === cleanEmail),
     );
 
     const cloudRevokedAt = cfg.revokedAccounts?.[accountCode.toUpperCase()] || 0;
+    const bonusPassesToDeduct = cfg.revokedBonusPasses?.[accountCode.toUpperCase()] ?? 0;
 
     for (const cReq of userGlobalReqs) {
       const localIdx = updatedLocalHistory.findIndex((l) => l.id === cReq.id);
@@ -523,7 +660,6 @@ export async function syncUserPurchasesAndProExpiryWithCloud(
               getPlanDurationMs(cReq.planType);
 
         if (!appliedIds.includes(cReq.id)) {
-          // First time applying this request (adds bonus pass via native key once)
           if (
             cReq.activationKey &&
             Platform.OS === "android" &&
@@ -544,7 +680,7 @@ export async function syncUserPurchasesAndProExpiryWithCloud(
       }
     }
 
-    // Check if Admin revoked/cancelled this user's subscription
+    // 2. Check if Admin revoked/cancelled this user's subscription
     const lastHandledRevoke = revokedMap[accountCode.toUpperCase()] || 0;
     const allCancelledInGlobal =
       userGlobalReqs.length > 0 &&
@@ -561,7 +697,7 @@ export async function syncUserPurchasesAndProExpiryWithCloud(
       if (Platform.OS === "android") {
         try {
           if (cloudRevokedAt > lastHandledRevoke && FocusLock?.revokeProSubscriptionNative) {
-            await FocusLock.revokeProSubscriptionNative(2);
+            await FocusLock.revokeProSubscriptionNative(bonusPassesToDeduct);
           }
           if (FocusLock?.setExactProStatusFromCloud) {
             await FocusLock.setExactProStatusFromCloud(false, 0, "Free");
@@ -587,7 +723,6 @@ export async function syncUserPurchasesAndProExpiryWithCloud(
       authoritativeProExpiry !== null &&
       authoritativeProExpiry > Date.now()
     ) {
-      // Enforce exact non-doubled expiry from approved request!
       if (Platform.OS === "android" && FocusLock?.setExactProStatusFromCloud) {
         try {
           await FocusLock.setExactProStatusFromCloud(
@@ -606,7 +741,7 @@ export async function syncUserPurchasesAndProExpiryWithCloud(
       );
     }
 
-    // Check if Toki Pro is in its LAST 3 DAYS and send notification once per day!
+    // 3. Check if Toki Pro is in its LAST 3 DAYS and send notification once per day!
     if (Platform.OS === "android" && FocusLock?.getFocusSessionState && !superAdmin) {
       const s = await FocusLock.getFocusSessionState();
       const proExpiresAt = Number(s?.proExpiresAt ?? 0);
@@ -963,7 +1098,7 @@ export async function getInAppNotices(): Promise<AppNoticeItem[]> {
       id: "welcome-1",
       title: "Toki 2.1 — Focus Lock & Pro Ready 👑",
       message:
-        "৪৫ মিনিট ডেইলি লকে ৯৯ দিনের স্ট্রিক চ্যালেঞ্জ (৭ দিন ফ্রি প্রো), ২৫+৫ সেশন লক এবং স্মার্ট কন্টাক্ট রিমাইন্ডার প্রস্তুত!",
+        "নতুন ইউজারের ৭ দিন ফ্রি প্রো, ৯৯ দিনের স্ট্রিক চ্যালেঞ্জ (৭ দিন ফ্রি প্রো), ২৫+৫ সেশন লক এবং স্মার্ট কন্টাক্ট রিমাইন্ডার প্রস্তুত!",
       timestamp: Date.now() - 3600 * 1000,
       read: false,
       type: "system",
@@ -1028,6 +1163,7 @@ export async function clearAllLocalAccountData(
   newUserId: string = "",
 ): Promise<void> {
   try {
+    // Note: DEVICE_TRIAL_CLAIMED_KEY is intentionally NOT removed so switching Gmails on the same phone cannot claim another 7-day trial!
     await AsyncStorage.multiRemove([
       "@networking_contacts",
       "@networking_stats",
@@ -1133,7 +1269,6 @@ export async function syncLocalDataToCloudIfOnline(
   forceCloudCheck: boolean = false,
 ): Promise<boolean> {
   try {
-    // Refresh session token first so offline-to-online transitions never fail getUser()!
     try {
       await supabase.auth.getSession();
     } catch {}
@@ -1153,7 +1288,6 @@ export async function syncLocalDataToCloudIfOnline(
       await AsyncStorage.setItem(ACTIVE_USER_ID_KEY, currentUser.id);
     }
 
-    // Sync pending/approved/cancelled requests from public.toki_cloud_store & check 3-day Pro expiry
     const cloudPurchaseSync = await syncUserPurchasesAndProExpiryWithCloud(
       currentUser.id,
       currentUser.email || "",
@@ -1277,7 +1411,6 @@ export async function syncLocalDataToCloudIfOnline(
     const cloudLastDate = cloudBackup.lastCompletedDate || "";
     const cloudStreak = cloudBackup.streakDays ?? 0;
 
-    // If revoked by Admin, DO NOT restore old cloudBackup.proExpiresAt!
     const cloudProExpiresAt = superAdmin
       ? 4102444800000
       : cloudPurchaseSync.isRevokedNow

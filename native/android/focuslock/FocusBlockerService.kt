@@ -22,6 +22,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.telecom.TelecomManager
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -140,7 +141,56 @@ class FocusBlockerService : AccessibilityService() {
         if (activeEmail == "juwelrana3426@gmail.com") return true
         val proFlag = prefs.getBoolean("IS_PRO_USER", false)
         val expiresAt = prefs.getLong("PRO_EXPIRES_AT", 0L)
-        return proFlag && expiresAt > System.currentTimeMillis()
+        if (!proFlag || expiresAt <= 0L) return false
+
+        val now = System.currentTimeMillis()
+        val maxSeen = prefs.getLong("MAX_SEEN_WALL_TIME", 0L)
+        // Anti-Time-Cheat: If user rolled phone clock backward by > 10 minutes offline, block Pro!
+        if (maxSeen > 0L && now < maxSeen - 10 * 60 * 1000L) {
+            return false
+        }
+        if (now > maxSeen) {
+            prefs.edit().putLong("MAX_SEEN_WALL_TIME", now).apply()
+        }
+        if (now >= expiresAt) return false
+
+        val savedSeal = prefs.getString("PRO_SECURITY_SEAL", "") ?: ""
+        val expectedSeal = FocusScheduler.computeProSecuritySeal(this, expiresAt)
+        if (savedSeal.isNotEmpty() && expectedSeal.isNotEmpty() && savedSeal != expectedSeal) {
+            return false
+        }
+        return true
+    }
+
+    // 🌟 Default Whitelisted Essential Apps: Phone/Dialer, bKash, and Nagad (Outside 2/6 App Quota!)
+    private fun isDefaultEssentialWhitelistedPackage(pkg: String): Boolean {
+        if (pkg.isEmpty()) return false
+        val lower = pkg.lowercase(Locale.US)
+        if (pkg == "com.bKash.customerapp" ||
+            lower == "com.bkash.customerapp" ||
+            pkg == "com.konasl.nagad" ||
+            lower == "com.konasl.nagad" ||
+            lower.contains("dialer") ||
+            lower.contains("incallui") ||
+            lower == "com.android.phone" ||
+            lower == "com.android.server.telecom" ||
+            lower == "com.google.android.dialer" ||
+            lower == "com.samsung.android.dialer" ||
+            lower == "com.samsung.android.incallui" ||
+            lower == "com.oplus.dialer" ||
+            lower == "com.coloros.phonemanager" ||
+            lower == "com.truecaller"
+        ) {
+            return true
+        }
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val tm = getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
+                val defDialer = tm?.defaultDialerPackage
+                if (!defDialer.isNullOrEmpty() && defDialer == pkg) return true
+            }
+        } catch (_: Exception) {}
+        return false
     }
 
     // Discovers News Plus & Drive PDF Viewer packages on Realme/Android
@@ -298,54 +348,89 @@ class FocusBlockerService : AccessibilityService() {
 
         val now = System.currentTimeMillis()
         val studyLaunchUntil = prefs.getLong("LAST_LAUNCHED_STUDY_YT_UNTIL", 0L)
+        val stickyActive = prefs.getBoolean("STUDY_SESSION_STICKY_ACTIVE", false)
+
         if (now < studyLaunchUntil) {
             cachedStudyMatch = true
             lastStudyScanAt = now
             return true
         }
 
-        if (rootNode == null) return cachedStudyMatch
-        if (now - lastStudyScanAt < 900L) {
+        if (rootNode == null) return cachedStudyMatch || stickyActive
+        if (now - lastStudyScanAt < 950L) {
             return cachedStudyMatch
         }
         lastStudyScanAt = now
 
-        val budget = intArrayOf(0)
-        // If user is on YouTube Home tab or Subscriptions feed (and no study keyword is matched), block it!
-        val matched = checkNodeTreeForStudyKeywords(rootNode, keywords, 0, budget)
-        cachedStudyMatch = matched
-        return matched
-    }
-
-    private fun checkNodeTreeForStudyKeywords(
-        node: AccessibilityNodeInfo?,
-        keywords: List<String>,
-        depth: Int,
-        budget: IntArray
-    ): Boolean {
-        if (node == null || depth > 9 || budget[0] > 65) return false
-        budget[0]++
-        if (!node.isVisibleToUser) return false
-
-        val txt = node.text?.toString()?.lowercase() ?: ""
-        val desc = node.contentDescription?.toString()?.lowercase() ?: ""
-
-        if (txt.isNotEmpty() || desc.isNotEmpty()) {
+        // 1. Fast C++ Native Search across the entire YouTube screen for any Study Channel or Study Video keyword!
+        var foundStudyKeywordOnScreen = false
+        try {
             for (kw in keywords) {
-                if ((txt.isNotEmpty() && txt.contains(kw)) ||
-                    (desc.isNotEmpty() && desc.contains(kw))
-                ) {
-                    return true
+                val cleanKw = kw.removePrefix("@").trim()
+                if (cleanKw.length >= 2) {
+                    val matches = rootNode.findAccessibilityNodeInfosByText(cleanKw)
+                    if (!matches.isNullOrEmpty()) {
+                        foundStudyKeywordOnScreen = true
+                        break
+                    }
                 }
             }
+        } catch (_: Throwable) {}
+
+        if (foundStudyKeywordOnScreen) {
+            if (!stickyActive) {
+                prefs.edit().putBoolean("STUDY_SESSION_STICKY_ACTIVE", true).apply()
+            }
+            cachedStudyMatch = true
+            return true
         }
 
-        val count = minOf(node.childCount, 12)
-        for (i in 0 until count) {
-            if (checkNodeTreeForStudyKeywords(node.getChild(i), keywords, depth + 1, budget)) {
-                return true
+        // 2. If user is already in a Sticky Study Session (e.g., watching a study video where title overlay auto-hid),
+        // keep allowing UNLESS they switched to YouTube Home / Subscriptions / Trending tab or searched something else!
+        if (stickyActive) {
+            val leftStudyContext = isOnDisallowedYouTubeFeedOrSearch(rootNode, keywords)
+            if (leftStudyContext) {
+                prefs.edit().putBoolean("STUDY_SESSION_STICKY_ACTIVE", false).apply()
+                cachedStudyMatch = false
+                return false
             }
+            cachedStudyMatch = true
+            return true
         }
+
+        cachedStudyMatch = false
+        return false
+    }
+
+    private fun isOnDisallowedYouTubeFeedOrSearch(
+        rootNode: AccessibilityNodeInfo,
+        keywords: List<String>
+    ): Boolean {
+        try {
+            // Check if bottom navigation "Home" or "Subscriptions" tab is selected
+            for (tabWord in listOf("Home", "হোম", "Subscriptions")) {
+                val tabNodes = rootNode.findAccessibilityNodeInfosByText(tabWord)
+                if (!tabNodes.isNullOrEmpty()) {
+                    for (n in tabNodes) {
+                        if (n.isSelected && n.isVisibleToUser) {
+                            return true
+                        }
+                    }
+                }
+            }
+            // Check if search bar has non-study text
+            val searchNodes = rootNode.findAccessibilityNodeInfosByViewId("com.google.android.youtube:id/search_edit_text")
+            if (!searchNodes.isNullOrEmpty()) {
+                val queryTxt = searchNodes[0].text?.toString()?.trim()?.lowercase() ?: ""
+                if (queryTxt.length >= 2) {
+                    val matchesStudy = keywords.any { kw ->
+                        val c = kw.removePrefix("@").trim()
+                        c.isNotEmpty() && (queryTxt.contains(c) || c.contains(queryTxt))
+                    }
+                    if (!matchesStudy) return true
+                }
+            }
+        } catch (_: Throwable) {}
         return false
     }
 
@@ -492,7 +577,8 @@ class FocusBlockerService : AccessibilityService() {
                 val pkg = root.packageName?.toString() ?: continue
                 if (pkg == applicationContext.packageName ||
                     pkg == "com.android.systemui" ||
-                    isKeyboardOrSystemOverlayPackage(pkg)
+                    isKeyboardOrSystemOverlayPackage(pkg) ||
+                    isDefaultEssentialWhitelistedPackage(pkg)
                 ) {
                     continue
                 }
@@ -648,11 +734,12 @@ class FocusBlockerService : AccessibilityService() {
                             !isKeyboardOrSystemOverlayPackage(currentPkg) &&
                             now >= graceUntil
                         ) {
+                            val isEssentialAllowed = isDefaultEssentialWhitelistedPackage(currentPkg)
                             val isPdfAllowed = isProActive(prefs) && (getPdfReaderPackages().contains(currentPkg) || currentPkg.lowercase().contains("pdf"))
                             val isStudyYtAllowed = isProActive(prefs) &&
                                 currentPkg == "com.google.android.youtube" &&
                                 (now < prefs.getLong("LAST_LAUNCHED_STUDY_YT_UNTIL", 0L) || getStudyKeywordsList(prefs).isNotEmpty())
-                            if (!allowedApps.contains(currentPkg) && !isPdfAllowed && !isStudyYtAllowed) {
+                            if (!isEssentialAllowed && !allowedApps.contains(currentPkg) && !isPdfAllowed && !isStudyYtAllowed) {
                                 stopYouTubeTracker()
                                 stopAllBackgroundMediaAndPiP()
                                 redirectToMainActivity(force = true)
@@ -764,6 +851,17 @@ class FocusBlockerService : AccessibilityService() {
 
         if (packageName == ownPackage || rootPackageName == ownPackage) {
             stopYouTubeTracker()
+            return
+        }
+
+        // Always allow Essential Default Whitelisted Apps: Phone/Dialer, bKash, and Nagad (Outside 2/6 quota!)
+        if (isDefaultEssentialWhitelistedPackage(packageName) ||
+            (rootPackageName != null && isDefaultEssentialWhitelistedPackage(rootPackageName))
+        ) {
+            stopYouTubeTracker()
+            if (prefs.getLong("WHITELIST_GRACE_UNTIL", 0L) > 0L) {
+                prefs.edit().putLong("WHITELIST_GRACE_UNTIL", 0L).apply()
+            }
             return
         }
 
@@ -1021,15 +1119,21 @@ class FocusBlockerService : AccessibilityService() {
 
     private fun redirectToMainActivity(force: Boolean) {
         val now = System.currentTimeMillis()
-        if (!force && now - lastRedirectAt < 250L) return
+        if (now - lastRedirectAt < 350L) return
+        try {
+            val activeRootPkg = rootInActiveWindow?.packageName?.toString()
+            if (activeRootPkg == applicationContext.packageName) {
+                return
+            }
+        } catch (_: Throwable) {}
         lastRedirectAt = now
 
         val intent = Intent(this, MainActivity::class.java).apply {
             addFlags(
                 Intent.FLAG_ACTIVITY_NEW_TASK or
                     Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
-                    Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                    Intent.FLAG_ACTIVITY_SINGLE_TOP
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                    Intent.FLAG_ACTIVITY_NO_ANIMATION
             )
             putExtra("FROM_FOCUS_LOCK", true)
         }

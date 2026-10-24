@@ -1717,6 +1717,54 @@ export default function StrictFocusScreen() {
               )}
             </View>
 
+            {/* Default Essential Whitelisted Apps (Phone, bKash, Nagad — Outside 2/6 Quota!) */}
+            <View className="bg-slate-900/90 border border-emerald-500/30 rounded-2xl p-2.5 mb-2.5">
+              <View className="flex-row items-center justify-between mb-2 px-1">
+                <Text
+                  allowFontScaling={false}
+                  className="text-emerald-300 text-[10px] font-black uppercase tracking-wider"
+                >
+                  ডিফল্ট জরুরি অ্যাপ (কোটার বাইরে)
+                </Text>
+                <Text
+                  allowFontScaling={false}
+                  className="text-slate-400 text-[10px] font-bold"
+                >
+                  Always Allowed
+                </Text>
+              </View>
+              <View className="flex-row gap-2">
+                {[
+                  { id: "PHONE", label: "Phone Call", icon: "phone" as const, color: "#34D399" },
+                  { id: "BKASH", label: "bKash", icon: "wallet-outline" as const, color: "#F43F5E" },
+                  { id: "NAGAD", label: "Nagad", icon: "cash-fast" as const, color: "#FB923C" },
+                ].map((ess) => (
+                  <Pressable
+                    key={ess.id}
+                    onPress={() => {
+                      if (FocusLock?.openEssentialApp) {
+                        void FocusLock.openEssentialApp(ess.id);
+                      }
+                    }}
+                    className="flex-1 bg-slate-800/90 border border-slate-700/80 py-2 px-2 rounded-xl flex-row items-center justify-center active:bg-slate-700"
+                  >
+                    <MaterialCommunityIcons
+                      name={ess.icon}
+                      size={15}
+                      color={ess.color}
+                    />
+                    <Text
+                      allowFontScaling={false}
+                      numberOfLines={1}
+                      className="text-white font-bold text-[11px] ml-1.5"
+                    >
+                      {ess.label}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+            </View>
+
             {/* Allowed Apps Grid */}
             <View className="bg-slate-900/90 border border-slate-800 rounded-3xl p-3.5">
               <Text
@@ -3632,8 +3680,8 @@ export default function StrictFocusScreen() {
                   className="text-slate-400 text-xs mt-0.5"
                 >
                   {isProUser
-                    ? "Toki Pro: সর্বোচ্চ ৬টি অ্যাপ সিলেক্ট করা যাবে"
-                    : "Free: সর্বোচ্চ ২টি অ্যাপ (Pro-তে ৬টি অ্যাপ)"}
+                    ? "Toki Pro: সর্বোচ্চ ৬টি অ্যাপ (Phone, bKash ও Nagad কোটার বাইরে ফ্রি)"
+                    : "Free: সর্বোচ্চ ২টি অ্যাপ (Phone, bKash ও Nagad কোটার বাইরে ফ্রি)"}
                 </Text>
               </View>
               <Pressable

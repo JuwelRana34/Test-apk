@@ -71,6 +71,9 @@ class FocusBlockerService : AccessibilityService() {
     private var foregroundStarted = false
     private var wasInBreakPhase = false
     private var breakWarningShownForCycle = -1L
+    private var lastDeepScanAt = 0L
+    private var cachedStudyMatch = false
+    private var lastStudyScanAt = 0L
 
     private var anchorOverlayView: View? = null
     private var instantBannerView: TextView? = null
@@ -180,6 +183,33 @@ class FocusBlockerService : AccessibilityService() {
             lower == "com.google.android.apps.nexuslauncher"
     }
 
+    private fun isKeyboardOrSystemOverlayPackage(pkg: String, cls: String = ""): Boolean {
+        val lowerPkg = pkg.lowercase()
+        val lowerCls = cls.lowercase()
+        return lowerPkg.contains("inputmethod") ||
+            lowerPkg.contains("keyboard") ||
+            lowerPkg.contains("honeyboard") ||
+            lowerPkg.contains("gboard") ||
+            lowerPkg.contains("ridmik") ||
+            lowerPkg.contains("swiftkey") ||
+            lowerPkg.contains("touchtype") ||
+            lowerPkg.contains("fleksy") ||
+            lowerPkg.contains("latin") ||
+            lowerPkg.contains("autofill") ||
+            lowerPkg.contains("credentialmanager") ||
+            lowerPkg == "com.google.android.tts" ||
+            lowerPkg == "com.google.android.as" ||
+            lowerPkg.contains("permissioncontroller") ||
+            lowerPkg.contains("packageinstaller") ||
+            lowerPkg.contains("intentresolver") ||
+            lowerPkg.contains("documentsui") ||
+            lowerPkg == "android" ||
+            lowerCls.contains("inputmethod") ||
+            lowerCls.contains("keyboard") ||
+            lowerCls.contains("resolveractivity") ||
+            lowerCls.contains("chooseractivity")
+    }
+
     private fun getAllowedAppsSet(prefs: android.content.SharedPreferences): Set<String> {
         val maxApps = if (isProActive(prefs)) 6 else 2
         val result = LinkedHashSet<String>()
@@ -263,24 +293,40 @@ class FocusBlockerService : AccessibilityService() {
         prefs: android.content.SharedPreferences
     ): Boolean {
         if (!isProActive(prefs)) return false
+        val keywords = getStudyKeywordsList(prefs)
+        if (keywords.isEmpty()) return false
+
         val now = System.currentTimeMillis()
         val studyLaunchUntil = prefs.getLong("LAST_LAUNCHED_STUDY_YT_UNTIL", 0L)
         if (now < studyLaunchUntil) {
+            cachedStudyMatch = true
+            lastStudyScanAt = now
             return true
         }
 
-        val keywords = getStudyKeywordsList(prefs)
-        if (keywords.isEmpty() || rootNode == null) return false
+        if (rootNode == null) return cachedStudyMatch
+        if (now - lastStudyScanAt < 900L) {
+            return cachedStudyMatch
+        }
+        lastStudyScanAt = now
 
-        return checkNodeTreeForStudyKeywords(rootNode, keywords, 0)
+        val budget = intArrayOf(0)
+        // If user is on YouTube Home tab or Subscriptions feed (and no study keyword is matched), block it!
+        val matched = checkNodeTreeForStudyKeywords(rootNode, keywords, 0, budget)
+        cachedStudyMatch = matched
+        return matched
     }
 
     private fun checkNodeTreeForStudyKeywords(
         node: AccessibilityNodeInfo?,
         keywords: List<String>,
-        depth: Int
+        depth: Int,
+        budget: IntArray
     ): Boolean {
-        if (node == null || depth > 14 || !node.isVisibleToUser) return false
+        if (node == null || depth > 9 || budget[0] > 65) return false
+        budget[0]++
+        if (!node.isVisibleToUser) return false
+
         val txt = node.text?.toString()?.lowercase() ?: ""
         val desc = node.contentDescription?.toString()?.lowercase() ?: ""
 
@@ -294,8 +340,9 @@ class FocusBlockerService : AccessibilityService() {
             }
         }
 
-        for (i in 0 until node.childCount) {
-            if (checkNodeTreeForStudyKeywords(node.getChild(i), keywords, depth + 1)) {
+        val count = minOf(node.childCount, 12)
+        for (i in 0 until count) {
+            if (checkNodeTreeForStudyKeywords(node.getChild(i), keywords, depth + 1, budget)) {
                 return true
             }
         }
@@ -435,11 +482,17 @@ class FocusBlockerService : AccessibilityService() {
             if (screenArea <= 0) return
 
             for (win in winList) {
+                if (win.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD ||
+                    win.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_SYSTEM ||
+                    win.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY
+                ) {
+                    continue
+                }
                 val root = win.root ?: continue
                 val pkg = root.packageName?.toString() ?: continue
                 if (pkg == applicationContext.packageName ||
                     pkg == "com.android.systemui" ||
-                    pkg == "android"
+                    isKeyboardOrSystemOverlayPackage(pkg)
                 ) {
                     continue
                 }
@@ -447,8 +500,12 @@ class FocusBlockerService : AccessibilityService() {
                 val bounds = android.graphics.Rect()
                 win.getBoundsInScreen(bounds)
                 val winArea = bounds.width() * bounds.height()
+                // Keyboards span full screen width at the bottom; PiP windows are narrower than 82% of screen width
+                val isFullWidthKeyboardLike = bounds.width() >= (dm.widthPixels * 85 / 100) && bounds.bottom >= (dm.heightPixels - 160)
+                if (isFullWidthKeyboardLike) continue
 
-                val isFloatingPiP = winArea in 1000..(screenArea * 60 / 100)
+                val isFloatingPiP = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && win.isInPictureInPictureMode) ||
+                    (winArea in 1000..(screenArea * 35 / 100) && bounds.width() < (dm.widthPixels * 82 / 100))
                 if (isFloatingPiP) {
                     if (!allowedApps.contains(pkg) || pkg == "com.google.android.youtube") {
                         stopAllBackgroundMediaAndPiP()
@@ -579,6 +636,29 @@ class FocusBlockerService : AccessibilityService() {
                         showInstantAlert("🔒 ব্রেক শেষ! আবার ফোকাস লক শুরু হয়েছে।")
                         redirectToMainActivity(force = true)
                     }
+                } else if (!inBreak) {
+                    // Continuous 1s Watchdog: Ensures lock is strictly enforced even if an AccessibilityEvent was skipped
+                    try {
+                        val currentRoot = rootInActiveWindow
+                        val currentPkg = currentRoot?.packageName?.toString() ?: ""
+                        val graceUntil = prefs.getLong("WHITELIST_GRACE_UNTIL", 0L)
+                        if (currentPkg.isNotEmpty() &&
+                            currentPkg != applicationContext.packageName &&
+                            currentPkg != "com.android.systemui" &&
+                            !isKeyboardOrSystemOverlayPackage(currentPkg) &&
+                            now >= graceUntil
+                        ) {
+                            val isPdfAllowed = isProActive(prefs) && (getPdfReaderPackages().contains(currentPkg) || currentPkg.lowercase().contains("pdf"))
+                            val isStudyYtAllowed = isProActive(prefs) &&
+                                currentPkg == "com.google.android.youtube" &&
+                                (now < prefs.getLong("LAST_LAUNCHED_STUDY_YT_UNTIL", 0L) || getStudyKeywordsList(prefs).isNotEmpty())
+                            if (!allowedApps.contains(currentPkg) && !isPdfAllowed && !isStudyYtAllowed) {
+                                stopYouTubeTracker()
+                                stopAllBackgroundMediaAndPiP()
+                                redirectToMainActivity(force = true)
+                            }
+                        }
+                    } catch (_: Throwable) {}
                 }
 
                 sessionTickHandler.postDelayed(this, 1000L)
@@ -599,7 +679,7 @@ class FocusBlockerService : AccessibilityService() {
     }
 
     private fun checkNodeTreeForVideo(node: AccessibilityNodeInfo?, depth: Int): Boolean {
-        if (node == null || depth > 12 || !node.isVisibleToUser) return false
+        if (node == null || depth > 8 || !node.isVisibleToUser) return false
         val viewId = node.viewIdResourceName?.lowercase() ?: ""
         val cls = node.className?.toString()?.lowercase() ?: ""
 
@@ -612,7 +692,8 @@ class FocusBlockerService : AccessibilityService() {
             return true
         }
 
-        for (i in 0 until node.childCount) {
+        val count = minOf(node.childCount, 10)
+        for (i in 0 until count) {
             if (checkNodeTreeForVideo(node.getChild(i), depth + 1)) return true
         }
         return false
@@ -688,18 +769,8 @@ class FocusBlockerService : AccessibilityService() {
 
         val lowerPkg = packageName.lowercase()
 
-        if (lowerPkg.contains("inputmethod") ||
-            lowerPkg.contains("keyboard") ||
-            lowerPkg.contains("honeyboard") ||
-            lowerPkg.contains("gboard") ||
-            lowerPkg.contains("ridmik") ||
-            lowerPkg.contains("permissioncontroller") ||
-            lowerPkg.contains("packageinstaller") ||
-            lowerPkg.contains("intentresolver") ||
-            lowerPkg.contains("documentsui") ||
-            lowerPkg == "android" ||
-            lowerClass.contains("resolveractivity") ||
-            lowerClass.contains("chooseractivity")
+        if (isKeyboardOrSystemOverlayPackage(packageName, eventClassName) ||
+            (rootPackageName != null && isKeyboardOrSystemOverlayPackage(rootPackageName))
         ) {
             return
         }
@@ -721,7 +792,11 @@ class FocusBlockerService : AccessibilityService() {
                 }
                 currentParent = currentParent.parent
             }
-            if (caughtShorts || (rootNode != null && containsShortsContent(rootNode))) {
+            val shouldDeepScanShorts = eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED || (now - lastDeepScanAt >= 750L)
+            if (shouldDeepScanShorts) {
+                lastDeepScanAt = now
+            }
+            if (caughtShorts || (shouldDeepScanShorts && rootNode != null && containsShortsContent(rootNode, 0, intArrayOf(0)))) {
                 performGlobalAction(GLOBAL_ACTION_BACK)
                 showInstantAlert("🚫 Focus & Break চলাকালীন Shorts এবং Reels সম্পূর্ণ নিষিদ্ধ!")
                 return
@@ -802,7 +877,8 @@ class FocusBlockerService : AccessibilityService() {
                         return
                     }
                 } else {
-                    if (generalUsedMillis >= generalLimitMillis) {
+                    val isGeneralYtWhitelisted = allowedApps.contains("com.google.android.youtube")
+                    if (!isGeneralYtWhitelisted || generalUsedMillis >= generalLimitMillis) {
                         val hasStudyItems = getStudyKeywordsList(prefs).isNotEmpty()
                         stopYouTubeTracker()
                         stopAllBackgroundMediaAndPiP()
@@ -1035,12 +1111,14 @@ class FocusBlockerService : AccessibilityService() {
                         return
                     }
                 } else {
+                    val allowedAppsNow = getAllowedAppsSet(prefs)
+                    val isGeneralYtWhitelisted = allowedAppsNow.contains("com.google.android.youtube")
                     val generalUsed = prefs.getLong("YT_USED_MILLIS", 0L) + delta
                     prefs.edit().putLong("YT_USED_MILLIS", generalUsed).commit()
 
                     val generalLimitMinutes = prefs.getInt("YT_LIMIT_MINUTES", 30).coerceIn(15, 45)
                     val generalLimitMillis = generalLimitMinutes * 60 * 1000L
-                    if (generalUsed >= generalLimitMillis) {
+                    if (!isGeneralYtWhitelisted || generalUsed >= generalLimitMillis) {
                         val hasStudyItems = getStudyKeywordsList(prefs).isNotEmpty()
                         val studyUsed = prefs.getLong("YT_STUDY_USED_MILLIS", 0L)
                         val studyLimitMillis = prefs.getInt("YT_STUDY_LIMIT_MINUTES", 210).coerceIn(90, 210) * 60 * 1000L
@@ -1135,11 +1213,13 @@ class FocusBlockerService : AccessibilityService() {
         return false
     }
 
-    private fun containsShortsContent(node: AccessibilityNodeInfo?): Boolean {
-        if (node == null || !node.isVisibleToUser) return false
+    private fun containsShortsContent(node: AccessibilityNodeInfo?, depth: Int = 0, budget: IntArray = intArrayOf(0)): Boolean {
+        if (node == null || depth > 8 || budget[0] > 55 || !node.isVisibleToUser) return false
+        budget[0]++
         if (isShortsNode(node)) return true
-        for (index in 0 until node.childCount) {
-            if (containsShortsContent(node.getChild(index))) return true
+        val count = minOf(node.childCount, 10)
+        for (index in 0 until count) {
+            if (containsShortsContent(node.getChild(index), depth + 1, budget)) return true
         }
         return false
     }

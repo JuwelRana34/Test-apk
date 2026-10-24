@@ -51,6 +51,8 @@ interface AppItem {
   icon?: string;
 }
 
+let cachedJsInstalledApps: AppItem[] = [];
+
 interface ScheduleItem {
   id: string;
   isEnabled: boolean;
@@ -266,13 +268,17 @@ export default function StrictFocusScreen() {
     deviceAdmin: false,
   });
 
-  const [installedApps, setInstalledApps] = useState<AppItem[]>([]);
+  const [installedApps, setInstalledApps] = useState<AppItem[]>(
+    () => cachedJsInstalledApps,
+  );
   const [selectedApps, setSelectedApps] = useState<string[]>([]);
   const [allowedDomains, setAllowedDomains] = useState<string[]>(
     DEFAULT_ALLOWED_DOMAINS,
   );
   const [newDomainInput, setNewDomainInput] = useState("");
-  const [loadingApps, setLoadingApps] = useState(true);
+  const [loadingApps, setLoadingApps] = useState(
+    () => cachedJsInstalledApps.length === 0,
+  );
   const [searchQuery, setSearchQuery] = useState("");
 
   // Modals
@@ -499,6 +505,11 @@ export default function StrictFocusScreen() {
   }, [isFocusActive]);
 
   const fetchInstalledApps = async () => {
+    if (cachedJsInstalledApps.length > 0) {
+      setInstalledApps(cachedJsInstalledApps);
+      setLoadingApps(false);
+      return;
+    }
     try {
       if (FocusLock?.getInstalledApps) {
         const apps = await FocusLock.getInstalledApps();
@@ -508,6 +519,7 @@ export default function StrictFocusScreen() {
         const sortedApps = uniqueAppsArray.sort((a, b) =>
           a.appName.localeCompare(b.appName),
         );
+        cachedJsInstalledApps = sortedApps;
         setInstalledApps(sortedApps);
       }
     } catch {
@@ -2391,7 +2403,17 @@ export default function StrictFocusScreen() {
             </View>
 
             {/* Horizontal Row of Selected App Icons */}
-            {allowedAppObjects.length === 0 ? (
+            {loadingApps ? (
+              <View className="bg-[#0B1120] py-3 rounded-2xl flex-row items-center justify-center border border-slate-800 mb-3">
+                <ActivityIndicator size="small" color="#818CF8" />
+                <Text
+                  allowFontScaling={false}
+                  className="text-indigo-300 font-bold text-xs ml-2"
+                >
+                  ফোনের অ্যাপ লিস্ট লোড হচ্ছে...
+                </Text>
+              </View>
+            ) : allowedAppObjects.length === 0 ? (
               <Pressable
                 onPress={() => setAppModalVisible(true)}
                 className="bg-[#0B1120] py-3 rounded-2xl items-center border border-slate-800 mb-3"
@@ -3634,8 +3656,14 @@ export default function StrictFocusScreen() {
             />
 
             {loadingApps ? (
-              <View className="py-10 items-center">
+              <View className="py-12 items-center justify-center">
                 <ActivityIndicator size="large" color="#818CF8" />
+                <Text
+                  allowFontScaling={false}
+                  className="text-indigo-200 font-bold text-xs mt-3"
+                >
+                  ফোনের সব অ্যাপ দ্রুত লোড হচ্ছে...
+                </Text>
               </View>
             ) : (
               <ScrollView

@@ -35,6 +35,7 @@ import {
   clearAllLocalAccountData,
   getAccountCodeForUser,
   getAdminAppConfig,
+  getPlanDurationMs,
   getUserPurchaseHistory,
   isSuperAdminEmail,
   isUserAdmin,
@@ -47,6 +48,32 @@ import {
 } from '../../lib/supabase';
 
 const { FocusLock } = NativeModules;
+
+interface HeatmapDayCell {
+  date: string;
+  dateNum: number;
+  monthLabel: string;
+  dayName: string;
+  minutes: number;
+  isToday: boolean;
+  globalIdx: number;
+}
+
+const MONTH_NAMES = [
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'May',
+  'Jun',
+  'Jul',
+  'Aug',
+  'Sep',
+  'Oct',
+  'Nov',
+  'Dec',
+];
+const DAY_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
 export default function ProfileScreen() {
   const router = useRouter();
@@ -65,13 +92,15 @@ export default function ProfileScreen() {
   const [logoutModalVisible, setLogoutModalVisible] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
 
+  const [selectedHeatmapDay, setSelectedHeatmapDay] = useState<HeatmapDayCell | null>(null);
+
   const [focusStats, setFocusStats] = useState<{
     streakDays: number;
     emergencyPasses: number;
     daysUntilNextPass: number;
     totalFocusMinutes: number;
     completedSessions: number;
-    heatmap: { date: string; minutes: number }[];
+    historyMap: Record<string, number>;
     isPro: boolean;
     proExpiresAt: number;
     proPlanName: string;
@@ -83,7 +112,7 @@ export default function ProfileScreen() {
     daysUntilNextPass: 99,
     totalFocusMinutes: 0,
     completedSessions: 0,
-    heatmap: [],
+    historyMap: {},
     isPro: false,
     proExpiresAt: 0,
     proPlanName: 'Free',
@@ -148,24 +177,7 @@ export default function ProfileScreen() {
     setFeedbackModal({ visible: true, title, message, type });
   };
 
-  // Always builds exactly 60 days for the 10x6 GitHub Matrix
-  const buildLast60DaysHeatmap = (historyObj: Record<string, number>) => {
-    const arr: { date: string; minutes: number }[] = [];
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    for (let i = 59; i >= 0; i--) {
-      const d = new Date(today);
-      d.setDate(today.getDate() - i);
-      const yyyy = d.getFullYear();
-      const mm = String(d.getMonth() + 1).padStart(2, '0');
-      const dd = String(d.getDate()).padStart(2, '0');
-      const iso = `${yyyy}-${mm}-${dd}`;
-      arr.push({ date: iso, minutes: Number(historyObj[iso] || 0) });
-    }
-    return arr;
-  };
-
-  const loadAllProfileData = async () => {
+  const loadAllProfileData = async (forceCloudCheck: boolean = false) => {
     try {
       let currentEmail = 'user@toki.app';
       let currentId = 'local-user';
@@ -212,8 +224,8 @@ export default function ProfileScreen() {
       const deterministicCode = getAccountCodeForUser(currentId || currentEmail);
       const superAdmin = isSuperAdminEmail(currentEmail);
 
-      // Load Admin Config & History (also syncs approved/cancelled requests from public.toki_cloud_store!)
-      const cfg = await getAdminAppConfig();
+      // Load Admin Config & History
+      const cfg = await getAdminAppConfig(forceCloudCheck);
       setAdminConfig(cfg);
       setEditWhatsapp(cfg.whatsappNumber);
       setEditBkash(cfg.bkashNagadNumber);
@@ -236,7 +248,6 @@ export default function ProfileScreen() {
         try {
           historyObj = JSON.parse(s.completedHistoryJson || '{}');
         } catch {}
-        const heatmapArr = buildLast60DaysHeatmap(historyObj);
         const totalFocusMins = Object.values(historyObj).reduce(
           (acc, val) => acc + (Number(val) || 0),
           0
@@ -257,7 +268,7 @@ export default function ProfileScreen() {
           totalFocusMinutes:
             totalFocusMins > 0 ? totalFocusMins : Number(s.totalCompleted ?? 0) * 45,
           completedSessions: Number(s.totalCompleted ?? 0),
-          heatmap: heatmapArr,
+          historyMap: historyObj,
           isPro,
           proExpiresAt,
           proPlanName: superAdmin
@@ -269,7 +280,6 @@ export default function ProfileScreen() {
       } else {
         setFocusStats((prev) => ({
           ...prev,
-          heatmap: buildLast60DaysHeatmap({}),
           isPro: superAdmin,
           proPlanName: superAdmin ? 'Super Admin Lifetime Pro' : 'Free',
           proDaysRemaining: superAdmin ? 9999 : 0,
@@ -303,23 +313,23 @@ export default function ProfileScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      void syncLocalDataToCloudIfOnline().then(() => loadAllProfileData());
+      void syncLocalDataToCloudIfOnline(true).then(() => loadAllProfileData(true));
     }, [])
   );
 
   const onRefresh = async () => {
     setRefreshing(true);
-    await syncLocalDataToCloudIfOnline();
-    await loadAllProfileData();
+    await syncLocalDataToCloudIfOnline(true);
+    await loadAllProfileData(true);
     setRefreshing(false);
   };
 
   const handleManualCloudSync = async () => {
     setSyncingCloud(true);
     try {
-      await syncLocalDataToCloudIfOnline();
+      await syncLocalDataToCloudIfOnline(true);
       await restoreCloudBackupAfterGoogleLogin();
-      await loadAllProfileData();
+      await loadAllProfileData(true);
       showFeedback(
         'ক্লাউড সিঙ্ক সম্পন্ন ☁️',
         'আপনার সব ডেটা, পেমেন্ট স্ট্যাটাস, স্ট্রিক এবং প্রো মেম্বারশিপ ক্লাউডে সিঙ্ক হয়েছে।',
@@ -346,7 +356,11 @@ export default function ProfileScreen() {
     }
     setLoggingOut(true);
     try {
-      await syncLocalDataToCloudIfOnline();
+      // Refresh session token first so offline-completed sessions are uploaded before wiping local storage!
+      try {
+        await supabase.auth.getSession();
+      } catch {}
+      await syncLocalDataToCloudIfOnline(true);
       try {
         await GoogleSignin.signOut();
       } catch {}
@@ -443,11 +457,11 @@ export default function ProfileScreen() {
             status: 'approved',
             activationKey: cleanKey,
             createdAt: Date.now(),
-            expiresAt: Number(res.proExpiresAt || Date.now() + 30 * 86400000),
+            expiresAt: Number(res.proExpiresAt || Date.now() + getPlanDurationMs(planType)),
           };
           await recordUserPurchaseHistory(newRecord);
-          await syncLocalDataToCloudIfOnline();
-          await loadAllProfileData();
+          await syncLocalDataToCloudIfOnline(true);
+          await loadAllProfileData(true);
           setActivationKeyInput('');
           showFeedback(
             'অভিনন্দন! সফলভাবে চালু হয়েছে 🎉',
@@ -470,7 +484,7 @@ export default function ProfileScreen() {
     }
   };
 
-  // Separate Submit Modes: withWhatsApp = false (In-App only) OR withWhatsApp = true (Submit + WhatsApp)
+  // Separate Submit Modes: openWhatsAppAfter = false (In-App only) OR true (Submit + WhatsApp)
   const handleSubmitPaymentRequest = async (openWhatsAppAfter: boolean) => {
     if (!trxIdInput.trim() || !senderPhoneInput.trim()) {
       showFeedback(
@@ -483,8 +497,9 @@ export default function ProfileScreen() {
     setSubmittingAction(true);
     try {
       const details = getPlanDetails(selectedPlanType);
+      const now = Date.now();
       const record: PurchaseRecord = {
-        id: `req-${Date.now()}`,
+        id: `req-${now}`,
         userEmail: userProfile.email,
         accountCode: focusStats.accountCode,
         planType: selectedPlanType,
@@ -493,12 +508,12 @@ export default function ProfileScreen() {
         trxId: trxIdInput.trim().toUpperCase(),
         senderPhone: senderPhoneInput.trim(),
         status: 'pending',
-        createdAt: Date.now(),
-        expiresAt: Date.now() + 60 * 86400000,
+        createdAt: now,
+        expiresAt: now + getPlanDurationMs(selectedPlanType),
       };
 
       await submitUserPaymentRequestToCloud(record);
-      await loadAllProfileData();
+      await loadAllProfileData(true);
 
       const savedTrx = trxIdInput.trim().toUpperCase();
       const savedPhone = senderPhoneInput.trim();
@@ -551,7 +566,7 @@ export default function ProfileScreen() {
         }
       }
       setTargetUserAccountCode(focusStats.accountCode);
-      await loadAllProfileData();
+      await loadAllProfileData(true);
       setAdminModalVisible(true);
     } catch {
       showFeedback('নিরাপত্তা যাচাই ব্যর্থ', 'ফিঙ্গারপ্রিন্ট যাচাই সম্পন্ন হয়নি।', 'error');
@@ -574,7 +589,7 @@ export default function ProfileScreen() {
     }
   };
 
-  // Button 1 in Admin Requests: ONLY Approve / Active in Cloud (No WhatsApp redirect!)
+  // Button 1 in Admin Requests: ONLY Approve / Active in Cloud (No doubling if re-approved!)
   const handleApproveRequestOnly = async (req: PurchaseRecord) => {
     try {
       if (FocusLock?.authenticateAdminBiometric) {
@@ -586,17 +601,11 @@ export default function ProfileScreen() {
         key = await FocusLock.generateActivationKeyNative(req.accountCode, req.planType);
       }
       await adminApprovePaymentRequestInCloud(req.id, key);
-      if (
-        req.accountCode === focusStats.accountCode &&
-        key &&
-        FocusLock?.verifyAndApplyActivationKey
-      ) {
-        await FocusLock.verifyAndApplyActivationKey(focusStats.accountCode, key);
-      }
-      await loadAllProfileData();
+      await syncLocalDataToCloudIfOnline(true);
+      await loadAllProfileData(true);
       showFeedback(
         'রিকোয়েস্ট Approved হয়েছে ✅',
-        `ইউজারের (${req.accountCode}) প্রো/পাস ক্লাউডে Active করে দেওয়া হয়েছে! ইউজার অ্যাপ রিফ্রেশ করলেই অটো চালু হয়ে যাবে।`,
+        `ইউজারের (${req.accountCode}) প্রো/পাস ক্লাউডে Active করে দেওয়া হয়েছে (নির্ধারিত মেয়াদের জন্য, ডাবল হবে না)।`,
         'success'
       );
     } catch {
@@ -611,7 +620,7 @@ export default function ProfileScreen() {
       if (!key && FocusLock?.generateActivationKeyNative) {
         key = await FocusLock.generateActivationKeyNative(req.accountCode, req.planType);
         await adminApprovePaymentRequestInCloud(req.id, key);
-        await loadAllProfileData();
+        await loadAllProfileData(true);
       }
       const waPhone = req.senderPhone.replace(/[^0-9]/g, '');
       const formattedWa = waPhone.startsWith('88') ? waPhone : `88${waPhone}`;
@@ -650,18 +659,12 @@ export default function ProfileScreen() {
       }
 
       await adminCancelOrRevokePurchaseInCloud(targetIdOrCode);
-      if (
-        targetAcc === focusStats.accountCode &&
-        !isSuperAdminEmail(userProfile.email) &&
-        FocusLock?.revokeProSubscriptionNative
-      ) {
-        await FocusLock.revokeProSubscriptionNative(2);
-      }
       setRevokeAccountCodeInput('');
-      await loadAllProfileData();
+      await syncLocalDataToCloudIfOnline(true);
+      await loadAllProfileData(true);
       showFeedback(
         'সাবস্ক্রিপশন / পাস বাতিল করা হয়েছে 🚫',
-        `ইউজারের (${targetAcc}) প্রো সাবস্ক্রিপশন ও বোনাস পাস ক্লাউড থেকে বাতিল (Cancelled) করা হয়েছে।`,
+        `ইউজারের (${targetAcc}) প্রো সাবস্ক্রিপশন ও বোনাস পাস ক্লাউড ও ডিভাইস থেকে সাথে সাথে বাতিল (Cancelled) করা হয়েছে।`,
         'info'
       );
     } catch {
@@ -750,7 +753,7 @@ export default function ProfileScreen() {
     setAdminConfig(nextCfg);
   };
 
-  const getHeatmapColor = (minutes: number, isLockedCell: boolean) => {
+  const getHeatmapCellColor = (minutes: number, isLockedCell: boolean) => {
     if (isLockedCell) return '#0F172A';
     if (minutes <= 0) return '#1E293B';
     if (minutes < 45) return '#065F46';
@@ -759,22 +762,44 @@ export default function ProfileScreen() {
     return '#34D399';
   };
 
-  // Group the 60 heatmap cells into 6 rows of 10 cells each (10x6 GitHub Matrix)
-  const heatmapRows = useMemo(() => {
-    const base60 =
-      focusStats.heatmap.length === 60
-        ? focusStats.heatmap
-        : buildLast60DaysHeatmap({});
-    const rows: { date: string; minutes: number; globalIdx: number }[][] = [];
-    for (let r = 0; r < 6; r++) {
-      const rowSlice = base60.slice(r * 10, r * 10 + 10).map((item, cIdx) => ({
-        ...item,
-        globalIdx: r * 10 + cIdx,
-      }));
-      rows.push(rowSlice);
+  // 🌟 v1.8.0 Classic Interactive GitHub Contribution Graph (9 Weekly Columns x 7 Days Sun..Sat)
+  const githubWeeklyColumns = useMemo(() => {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const totalDays = 63; // 9 full weeks (last ~60 days)
+    const cells: HeatmapDayCell[] = [];
+
+    for (let i = totalDays - 1; i >= 0; i--) {
+      const d = new Date(today);
+      d.setDate(today.getDate() - i);
+      const yyyy = d.getFullYear();
+      const mm = String(d.getMonth() + 1).padStart(2, '0');
+      const dd = String(d.getDate()).padStart(2, '0');
+      const iso = `${yyyy}-${mm}-${dd}`;
+      const mins = Number(focusStats.historyMap[iso] || 0);
+      cells.push({
+        date: iso,
+        dateNum: d.getDate(),
+        monthLabel: `${d.getDate()} ${MONTH_NAMES[d.getMonth()]} ${yyyy}`,
+        dayName: DAY_SHORT[d.getDay()],
+        minutes: mins,
+        isToday: i === 0,
+        globalIdx: totalDays - 1 - i,
+      });
     }
-    return rows;
-  }, [focusStats.heatmap]);
+
+    const weeks: HeatmapDayCell[][] = [];
+    for (let w = 0; w < 9; w++) {
+      weeks.push(cells.slice(w * 7, w * 7 + 7));
+    }
+    return weeks;
+  }, [focusStats.historyMap]);
+
+  const activeDayDetail = useMemo(() => {
+    if (selectedHeatmapDay) return selectedHeatmapDay;
+    const lastWeek = githubWeeklyColumns[githubWeeklyColumns.length - 1] || [];
+    return lastWeek[lastWeek.length - 1] || null;
+  }, [selectedHeatmapDay, githubWeeklyColumns]);
 
   const totalHours = (focusStats.totalFocusMinutes / 60).toFixed(1);
   const userIsAdmin = isUserAdmin(userProfile.email, adminConfig);
@@ -920,11 +945,7 @@ export default function ProfileScreen() {
               setStoreModalVisible(true);
             }}
           >
-            <MaterialCommunityIcons
-              name="crown"
-              size={18}
-              color={focusStats.isPro ? '#0F172A' : '#0F172A'}
-            />
+            <MaterialCommunityIcons name="crown" size={18} color="#0F172A" />
             <Text allowFontScaling={false} numberOfLines={1} style={styles.proMainCtaText}>
               {userIsSuperAdmin
                 ? 'Toki Pro 👑 (Super Admin Lifetime Active)'
@@ -1079,7 +1100,7 @@ export default function ProfileScreen() {
         </View>
 
         {/* =================================================================== */}
-        {/* 5. 60-DAY GITHUB GREEN CONTRIBUTION MATRIX (10 COLUMNS x 6 ROWS)    */}
+        {/* 5. v1.8.0 CLASSIC INTERACTIVE GITHUB CONTRIBUTION HEATMAP           */}
         {/* =================================================================== */}
         <View style={styles.heatmapCard}>
           <View style={styles.heatmapHeaderRow}>
@@ -1089,40 +1110,127 @@ export default function ProfileScreen() {
               </Text>
               <Text allowFontScaling={false} style={styles.heatmapSub}>
                 {focusStats.isPro
-                  ? 'Toki Pro • বিগত ৬০ দিনের সম্পূর্ণ ফোকাস স্ট্রিক ম্যাট্রিক্স'
-                  : 'ফ্রি ভার্সনে শেষ ১৪ দিন সচল (পূর্ণ ৬০ দিনের গ্রাফ দেখতে Toki Pro নিন)'}
+                  ? 'যেকোনো বক্সে ট্যাপ করে ওই দিনের ফোকাস বিস্তারিত দেখুন'
+                  : 'ফ্রি ভার্সনে শেষ ১৪ দিন সচল (পূর্ণ ৬০ দিনের চার্ট দেখতে Toki Pro নিন)'}
               </Text>
             </View>
             <View style={styles.heatmapBadge}>
-              <Ionicons name="grid" size={14} color="#10B981" />
+              <MaterialCommunityIcons name="calendar-check" size={14} color="#34D399" />
               <Text allowFontScaling={false} style={styles.heatmapBadgeText}>
                 60D
               </Text>
             </View>
           </View>
 
-          {/* 6 Rows x 10 Columns = 60 Distinct Boxes */}
-          <View style={styles.heatmapMatrixWrap}>
-            {heatmapRows.map((row, rIdx) => (
-              <View key={`row-${rIdx}`} style={styles.heatmapRow}>
-                {row.map((cell) => {
-                  const isLockedForFree = !focusStats.isPro && cell.globalIdx < 46;
-                  return (
-                    <View
-                      key={cell.date}
-                      style={[
-                        styles.heatmapCell,
-                        {
-                          backgroundColor: getHeatmapColor(cell.minutes, isLockedForFree),
-                          borderColor: isLockedForFree ? '#1E293B' : 'rgba(255,255,255,0.06)',
-                        },
-                      ]}
-                    />
-                  );
-                })}
-              </View>
-            ))}
+          {/* v1.8.0 Weekly Columns Layout (Day Labels on Left + 9 Weekly Columns of 7 Days) */}
+          <View style={styles.ghGraphContainer}>
+            {/* Left Day-of-Week Labels */}
+            <View style={styles.ghDayLabelsCol}>
+              {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((dLabel, idx) => (
+                <View key={dLabel} style={styles.ghDayLabelCell}>
+                  <Text
+                    allowFontScaling={false}
+                    style={[
+                      styles.ghDayLabelText,
+                      idx % 2 === 1 && { opacity: 0.45 },
+                    ]}
+                  >
+                    {dLabel}
+                  </Text>
+                </View>
+              ))}
+            </View>
+
+            {/* 9 Weekly Columns */}
+            <View style={styles.ghColumnsArea}>
+              {githubWeeklyColumns.map((weekCol, wIdx) => (
+                <View key={`week-${wIdx}`} style={styles.ghWeekCol}>
+                  {weekCol.map((cell) => {
+                    const isLockedForFree = !focusStats.isPro && cell.globalIdx < 49;
+                    const isSelected = activeDayDetail?.date === cell.date;
+                    const done = cell.minutes >= 45 && !isLockedForFree;
+                    return (
+                      <TouchableOpacity
+                        key={cell.date}
+                        activeOpacity={0.75}
+                        onPress={() => setSelectedHeatmapDay(cell)}
+                        style={[
+                          styles.ghSquareCell,
+                          {
+                            backgroundColor: getHeatmapCellColor(cell.minutes, isLockedForFree),
+                            borderColor: isSelected
+                              ? '#38BDF8'
+                              : cell.isToday
+                              ? '#34D399'
+                              : isLockedForFree
+                              ? '#1E293B'
+                              : 'rgba(255,255,255,0.08)',
+                            borderWidth: isSelected || cell.isToday ? 1.5 : 1,
+                          },
+                        ]}
+                      >
+                        {done ? (
+                          <MaterialCommunityIcons
+                            name="check-bold"
+                            size={10}
+                            color="#064E3B"
+                          />
+                        ) : (
+                          <Text
+                            allowFontScaling={false}
+                            style={[
+                              styles.ghSquareDateNum,
+                              {
+                                color: cell.isToday
+                                  ? '#34D399'
+                                  : isLockedForFree
+                                  ? '#334155'
+                                  : '#94A3B8',
+                              },
+                            ]}
+                          >
+                            {cell.dateNum}
+                          </Text>
+                        )}
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              ))}
+            </View>
           </View>
+
+          {/* Interactive Selected Day Info Pill */}
+          {activeDayDetail && (
+            <View style={styles.ghSelectedDayBanner}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flex: 1 }}>
+                <Ionicons
+                  name={activeDayDetail.minutes >= 45 ? 'checkmark-circle' : 'calendar-outline'}
+                  size={15}
+                  color={activeDayDetail.minutes >= 45 ? '#34D399' : '#38BDF8'}
+                />
+                <Text
+                  allowFontScaling={false}
+                  numberOfLines={1}
+                  style={styles.ghSelectedDayText}
+                >
+                  {activeDayDetail.dayName}, {activeDayDetail.monthLabel}
+                  {activeDayDetail.isToday ? ' (Today)' : ''}
+                </Text>
+              </View>
+              <Text
+                allowFontScaling={false}
+                style={[
+                  styles.ghSelectedMinsText,
+                  { color: activeDayDetail.minutes >= 45 ? '#34D399' : '#94A3B8' },
+                ]}
+              >
+                {activeDayDetail.minutes > 0
+                  ? `${activeDayDetail.minutes} মিনিট ফোকাস`
+                  : 'কোনো লক সেশন নেই'}
+              </Text>
+            </View>
+          )}
 
           {/* Legend Row */}
           <View style={styles.heatmapLegendRow}>
@@ -1130,13 +1238,10 @@ export default function ProfileScreen() {
               Less
             </Text>
             {['#1E293B', '#065F46', '#059669', '#10B981', '#34D399'].map((col, idx) => (
-              <View
-                key={idx}
-                style={[styles.legendBox, { backgroundColor: col }]}
-              />
+              <View key={idx} style={[styles.legendBox, { backgroundColor: col }]} />
             ))}
             <Text allowFontScaling={false} style={styles.legendText}>
-              More (≥4h)
+              More (≥45m✓)
             </Text>
           </View>
         </View>
@@ -1561,7 +1666,10 @@ export default function ProfileScreen() {
               {storeTab === 'HISTORY' && (
                 <View style={{ paddingVertical: 6 }}>
                   <View style={styles.historyRefreshRow}>
-                    <Text allowFontScaling={false} style={[styles.redeemSub, { flex: 1, marginBottom: 0 }]}>
+                    <Text
+                      allowFontScaling={false}
+                      style={[styles.redeemSub, { flex: 1, marginBottom: 0 }]}
+                    >
                       ৬০ দিনের পুরনো হিস্ট্রি স্বয়ংক্রিয়ভাবে ক্লিন হয়ে যায়।
                     </Text>
                     <TouchableOpacity
@@ -1748,7 +1856,9 @@ export default function ProfileScreen() {
                       >
                         {generatedAdminKey}
                       </Text>
-                      <View style={{ flexDirection: 'row', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
+                      <View
+                        style={{ flexDirection: 'row', gap: 8, marginTop: 10, flexWrap: 'wrap' }}
+                      >
                         <TouchableOpacity
                           style={[styles.smallAdminBtn, { backgroundColor: '#38BDF8', flex: 1 }]}
                           onPress={() =>
@@ -1773,7 +1883,7 @@ export default function ProfileScreen() {
                     ২. ইউজারের সাবস্ক্রিপশন / পাস বাতিল করুন (Cancel / Revoke)
                   </Text>
                   <Text allowFontScaling={false} style={styles.redeemSub}>
-                    ভুল করে কারো প্রো বা পাস চালু হয়ে গেলে তার Account Code (যেমন TK-XXXXXXXX) লিখে নিচে চাপলে তার ফোন থেকে প্রো ও পাস বাতিল হয়ে যাবে।
+                    ভুল করে কারো প্রো বা পাস চালু হয়ে গেলে তার Account Code (যেমন TK-XXXXXXXX) লিখে নিচে চাপলে তার ফোন থেকে প্রো ও পাস সাথে সাথে বাতিল হয়ে ফ্রি মোডে ফিরে যাবে।
                   </Text>
                   <TextInput
                     style={styles.storeInput}
@@ -1801,12 +1911,15 @@ export default function ProfileScreen() {
               {adminTab === 'REQUESTS' && (
                 <View>
                   <View style={styles.historyRefreshRow}>
-                    <Text allowFontScaling={false} style={[styles.redeemTitle, { flex: 1, marginBottom: 0 }]}>
+                    <Text
+                      allowFontScaling={false}
+                      style={[styles.redeemTitle, { flex: 1, marginBottom: 0 }]}
+                    >
                       সকল পেমেন্ট রিকোয়েস্ট (৬০ দিন অটো-ক্লিন)
                     </Text>
                     <TouchableOpacity
                       style={styles.miniRefreshBtn}
-                      onPress={loadAllProfileData}
+                      onPress={() => void loadAllProfileData(true)}
                     >
                       <Feather name="refresh-cw" size={12} color="#38BDF8" />
                       <Text allowFontScaling={false} style={styles.miniRefreshText}>
@@ -2090,7 +2203,7 @@ export default function ProfileScreen() {
                   </Text>
                   <TextInput
                     style={styles.storeInput}
-                    placeholder="যেমন: 2.1.0"
+                    placeholder="যেমন: 2.2.0"
                     placeholderTextColor="#64748B"
                     value={editOtaVersion}
                     onChangeText={setEditOtaVersion}
@@ -2208,7 +2321,7 @@ export default function ProfileScreen() {
               অ্যাকাউন্ট লগআউট করবেন?
             </Text>
             <Text allowFontScaling={false} style={styles.modalSub}>
-              লগআউট করার আগে আপনার সব কন্টাক্ট, শিডিউল ও প্রো স্ট্যাটাস ক্লাউডে ব্যাকআপ করে নেওয়া হবে এবং পরবর্তী লগইনে নতুন জিমেইল সিলেক্ট করার অপশন আসবে।
+              লগআউট করার আগে আপনার অফলাইনের সব সেশন, কন্টাক্ট, শিডিউল ও প্রো স্ট্যাটাস ক্লাউডে ব্যাকআপ করে নেওয়া হবে।
             </Text>
             <View style={styles.modalActionRow}>
               <TouchableOpacity
@@ -2524,24 +2637,71 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(16, 185, 129, 0.35)',
   },
   heatmapBadgeText: { color: '#34D399', fontSize: 11, fontWeight: '900' },
-  heatmapMatrixWrap: {
+  ghGraphContainer: {
+    flexDirection: 'row',
     backgroundColor: '#0B1120',
     padding: 10,
-    borderRadius: 16,
+    borderRadius: 18,
     borderWidth: 1,
     borderColor: '#1E293B',
-    gap: 6,
+    alignItems: 'center',
   },
-  heatmapRow: {
+  ghDayLabelsCol: {
+    marginRight: 8,
+    justifyContent: 'space-between',
+    gap: 4,
+  },
+  ghDayLabelCell: {
+    height: 24,
+    justifyContent: 'center',
+  },
+  ghDayLabelText: {
+    color: '#64748B',
+    fontSize: 9,
+    fontWeight: '800',
+  },
+  ghColumnsArea: {
+    flex: 1,
     flexDirection: 'row',
     justifyContent: 'space-between',
-    gap: 5,
+    gap: 4,
   },
-  heatmapCell: {
+  ghWeekCol: {
     flex: 1,
-    aspectRatio: 1,
-    borderRadius: 5,
+    gap: 4,
+  },
+  ghSquareCell: {
+    height: 24,
+    borderRadius: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  ghSquareDateNum: {
+    fontSize: 8.5,
+    fontWeight: '800',
+  },
+  ghSelectedDayBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#0B1120',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 12,
     borderWidth: 1,
+    borderColor: '#1E293B',
+    marginTop: 10,
+    gap: 8,
+  },
+  ghSelectedDayText: {
+    color: '#E2E8F0',
+    fontSize: 11,
+    fontWeight: '800',
+    flex: 1,
+  },
+  ghSelectedMinsText: {
+    fontSize: 11,
+    fontWeight: '900',
   },
   heatmapLegendRow: {
     flexDirection: 'row',

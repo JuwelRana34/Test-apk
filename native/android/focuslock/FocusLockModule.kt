@@ -51,6 +51,8 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
         private const val MAX_SCHEDULE_MINUTES = 900
 
         private const val BIOMETRIC_REQUEST_CODE = 5229
+        @Volatile
+        private var cachedInstalledApps: List<Triple<String, String, String?>>? = null
 
         // 🌟 XOR-Obfuscated Secret Key Bytes so nobody can grep strings from the APK!
         private val OBFUSCATED_SALT = intArrayOf(
@@ -416,6 +418,37 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
         }
     }
 
+    @ReactMethod
+    fun setExactProStatusFromCloud(
+        isPro: Boolean,
+        proExpiresAt: Double,
+        proPlanName: String,
+        promise: Promise
+    ) {
+        try {
+            val prefs = reactApplicationContext.getSharedPreferences("FocusModePrefs", Context.MODE_PRIVATE)
+            val activeEmail = (prefs.getString("ACTIVE_USER_EMAIL", "") ?: "").trim().lowercase(Locale.US)
+            if (activeEmail == "juwelrana3426@gmail.com") {
+                promise.resolve(true)
+                return
+            }
+            val expiryLong = if (isPro) proExpiresAt.toLong() else 0L
+            val activeNow = isPro && expiryLong > System.currentTimeMillis()
+            val editor = prefs.edit()
+                .putBoolean("IS_PRO_USER", activeNow)
+                .putLong("PRO_EXPIRES_AT", if (activeNow) expiryLong else 0L)
+                .putString("PRO_PLAN_NAME", if (activeNow) proPlanName else "Free")
+            if (!activeNow) {
+                editor.putBoolean("POMODORO_ENABLED", false)
+                editor.putBoolean("SCHEDULE_BREAK_ENABLED", false)
+            }
+            editor.commit()
+            promise.resolve(true)
+        } catch (e: Exception) {
+            promise.resolve(false)
+        }
+    }
+
     private fun saveAllowedAppsToPrefs(prefs: android.content.SharedPreferences, pkgSet: Set<String>) {
         val maxAllowed = if (isProActive(prefs)) 6 else 2
         val limitedSet = pkgSet.take(maxAllowed).toSet()
@@ -573,35 +606,60 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
 
     @ReactMethod
     fun getInstalledApps(promise: Promise) {
-        try {
-            val pm = reactApplicationContext.packageManager
-            val packages = pm.getInstalledPackages(PackageManager.GET_META_DATA)
-            val appList = WritableNativeArray()
+        val existing = cachedInstalledApps
+        if (!existing.isNullOrEmpty()) {
+            val fastArray = WritableNativeArray()
+            for (item in existing) {
+                val map = WritableNativeMap().apply {
+                    putString("packageName", item.first)
+                    putString("appName", item.second)
+                    putString("icon", item.third)
+                }
+                fastArray.pushMap(map)
+            }
+            promise.resolve(fastArray)
+            return
+        }
 
-            for (pkgInfo in packages) {
-                val appInfo = pkgInfo.applicationInfo ?: continue
-                val isSystem = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
-                val isUpdatedSystem = (appInfo.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
+        Thread {
+            try {
+                val pm = reactApplicationContext.packageManager
+                val packages = pm.getInstalledPackages(0)
+                val tempList = ArrayList<Triple<String, String, String?>>()
 
-                val launchIntent = pm.getLaunchIntentForPackage(pkgInfo.packageName)
-                if (launchIntent != null || (!isSystem || isUpdatedSystem)) {
-                    if (pkgInfo.packageName == reactApplicationContext.packageName) continue
+                for (pkgInfo in packages) {
+                    val appInfo = pkgInfo.applicationInfo ?: continue
+                    val isSystem = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
+                    val isUpdatedSystem = (appInfo.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
 
-                    val appName = pm.getApplicationLabel(appInfo).toString()
-                    val iconDrawable = pm.getApplicationIcon(appInfo)
+                    val launchIntent = pm.getLaunchIntentForPackage(pkgInfo.packageName)
+                    if (launchIntent != null || (!isSystem || isUpdatedSystem)) {
+                        if (pkgInfo.packageName == reactApplicationContext.packageName) continue
 
+                        val appName = pm.getApplicationLabel(appInfo).toString()
+                        val iconDrawable = pm.getApplicationIcon(appInfo)
+                        val iconB64 = drawableToBase64(iconDrawable)
+                        tempList.add(Triple(pkgInfo.packageName, appName, iconB64))
+                    }
+                }
+
+                tempList.sortBy { it.second.lowercase(Locale.US) }
+                cachedInstalledApps = tempList
+
+                val appList = WritableNativeArray()
+                for (item in tempList) {
                     val map = WritableNativeMap().apply {
-                        putString("packageName", pkgInfo.packageName)
-                        putString("appName", appName)
-                        putString("icon", drawableToBase64(iconDrawable))
+                        putString("packageName", item.first)
+                        putString("appName", item.second)
+                        putString("icon", item.third)
                     }
                     appList.pushMap(map)
                 }
+                promise.resolve(appList)
+            } catch (e: Exception) {
+                promise.reject("ERROR", e.message)
             }
-            promise.resolve(appList)
-        } catch (e: Exception) {
-            promise.reject("ERROR", e.message)
-        }
+        }.start()
     }
 
     private fun drawableToBase64(drawable: Drawable?): String? {
@@ -718,7 +776,7 @@ class FocusLockModule(reactContext: ReactApplicationContext) : ReactContextBaseJ
             prefs.edit()
                 .putString("LAST_LAUNCHED_ALLOWED_APP", ytPkg)
                 .putLong("WHITELIST_GRACE_UNTIL", now + 1500L)
-                .putLong("LAST_LAUNCHED_STUDY_YT_UNTIL", now + 15 * 60 * 1000L)
+                .putLong("LAST_LAUNCHED_STUDY_YT_UNTIL", now + 6000L)
                 .commit()
 
             reactApplicationContext.sendBroadcast(

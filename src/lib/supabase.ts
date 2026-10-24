@@ -21,10 +21,10 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
 const { FocusLock } = NativeModules;
 
 // ============================================================================
-// TOKI v2.0.0 — GLOBAL CLOUD STORE (public.toki_cloud_store), PRO, ADMIN & OTA
+// TOKI v2.1.0 — GLOBAL CLOUD STORE (public.toki_cloud_store), PRO, ADMIN & OTA
 // ============================================================================
 
-export const CURRENT_APP_VERSION = "2.0.0";
+export const CURRENT_APP_VERSION = "2.1.0";
 export const SUPER_ADMIN_EMAIL = "juwelrana3426@gmail.com";
 export const ADMIN_APP_CONFIG_KEY = "@toki_admin_app_config_v2";
 export const USER_PURCHASE_HISTORY_KEY = "@toki_user_purchase_history_v2";
@@ -35,6 +35,9 @@ export const PRO_EXPIRY_WARN_DATE_KEY = "@toki_pro_expiry_warn_date_v2";
 const GLOBAL_STORE_ROW_ID = "global_admin_store_v2";
 const SIXTY_DAYS_MS = 60 * 24 * 60 * 60 * 1000;
 const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+let lastGlobalStoreFetchAt = 0;
 
 export interface ExamCountdownGoal {
   title: string;
@@ -54,6 +57,7 @@ export interface PurchaseRecord {
   activationKey?: string;
   createdAt: number;
   expiresAt: number;
+  approvedAt?: number;
   revokedAt?: number;
 }
 
@@ -94,12 +98,27 @@ export const DEFAULT_ADMIN_CONFIG: AdminAppConfig = {
   appUpdate: {
     latestVersion: CURRENT_APP_VERSION,
     downloadUrl: "",
-    releaseNotes: "Toki Pro 👑, ৯৯ দিনের স্ট্রিক চ্যালেঞ্জ এবং স্মার্ট ফোকাস রিপোর্ট যুক্ত হয়েছে!",
+    releaseNotes: "Toki v2.1.0 👑 — নিখুঁত গিটহাব গ্রাফ, স্টাডি ইউটিউব ফিক্স এবং স্মার্ট ক্লাউড সিঙ্ক!",
     forceUpdate: false,
   },
   salesHistory: [],
   revokedAccounts: {},
 };
+
+export function getPlanDurationMs(
+  planType: "PRO30" | "PRO180" | "PRO365" | "PASS1" | "PASS3",
+): number {
+  switch (planType) {
+    case "PRO30":
+      return 30 * DAY_MS;
+    case "PRO180":
+      return 180 * DAY_MS;
+    case "PRO365":
+      return 365 * DAY_MS;
+    default:
+      return 60 * DAY_MS;
+  }
+}
 
 export function getAccountCodeForUser(userIdOrEmail: string): string {
   const raw = (userIdOrEmail || "toki-user").trim().toLowerCase();
@@ -159,8 +178,11 @@ export async function saveExamCountdownGoal(goal: ExamCountdownGoal): Promise<vo
 
 /**
  * Fetches Global Admin Config & Shared Sales Requests from public.toki_cloud_store
+ * Uses smart caching so Supabase Free Tier is never spammed!
  */
-export async function getAdminAppConfig(): Promise<AdminAppConfig> {
+export async function getAdminAppConfig(
+  forceCloudFetch: boolean = false,
+): Promise<AdminAppConfig> {
   let localCfg: AdminAppConfig = { ...DEFAULT_ADMIN_CONFIG };
   try {
     const raw = await AsyncStorage.getItem(ADMIN_APP_CONFIG_KEY);
@@ -176,41 +198,47 @@ export async function getAdminAppConfig(): Promise<AdminAppConfig> {
     }
   } catch {}
 
-  // 1. Primary Shared Cloud Table: public.toki_cloud_store
-  try {
-    const { data: rowData, error: rowErr } = await supabase
-      .from("toki_cloud_store")
-      .select("payload")
-      .eq("id", GLOBAL_STORE_ROW_ID)
-      .maybeSingle();
+  const now = Date.now();
+  const shouldQueryCloud =
+    forceCloudFetch || now - lastGlobalStoreFetchAt > 4 * 60 * 1000;
 
-    if (!rowErr && rowData?.payload && typeof rowData.payload === "object") {
-      const cloudCfg = rowData.payload as Partial<AdminAppConfig>;
-      const mergedSalesMap = new Map<string, PurchaseRecord>();
-      [...(localCfg.salesHistory || []), ...(cloudCfg.salesHistory || [])].forEach((item) => {
-        if (item && item.id) {
-          const existing = mergedSalesMap.get(item.id);
-          if (!existing || item.status !== "pending") {
-            mergedSalesMap.set(item.id, item);
-          }
-        }
-      });
+  if (shouldQueryCloud) {
+    try {
+      const { data: rowData, error: rowErr } = await supabase
+        .from("toki_cloud_store")
+        .select("payload")
+        .eq("id", GLOBAL_STORE_ROW_ID)
+        .maybeSingle();
 
-      localCfg = {
-        ...localCfg,
-        ...cloudCfg,
-        prices: { ...localCfg.prices, ...(cloudCfg.prices || {}) },
-        appUpdate: { ...localCfg.appUpdate, ...(cloudCfg.appUpdate || {}) },
-        salesHistory: Array.from(mergedSalesMap.values()).sort(
-          (a, b) => (b.createdAt || 0) - (a.createdAt || 0),
-        ),
-        revokedAccounts: {
-          ...(localCfg.revokedAccounts || {}),
-          ...(cloudCfg.revokedAccounts || {}),
-        },
-      };
-    }
-  } catch {}
+      if (!rowErr && rowData?.payload && typeof rowData.payload === "object") {
+        lastGlobalStoreFetchAt = now;
+        const cloudCfg = rowData.payload as Partial<AdminAppConfig>;
+        const mergedSalesMap = new Map<string, PurchaseRecord>();
+        // Cloud status always takes precedence over local status!
+        [...(localCfg.salesHistory || []), ...(cloudCfg.salesHistory || [])].forEach(
+          (item) => {
+            if (item && item.id) {
+              mergedSalesMap.set(item.id, item);
+            }
+          },
+        );
+
+        localCfg = {
+          ...localCfg,
+          ...cloudCfg,
+          prices: { ...localCfg.prices, ...(cloudCfg.prices || {}) },
+          appUpdate: { ...localCfg.appUpdate, ...(cloudCfg.appUpdate || {}) },
+          salesHistory: Array.from(mergedSalesMap.values()).sort(
+            (a, b) => (b.createdAt || 0) - (a.createdAt || 0),
+          ),
+          revokedAccounts: {
+            ...(localCfg.revokedAccounts || {}),
+            ...(cloudCfg.revokedAccounts || {}),
+          },
+        };
+      }
+    } catch {}
+  }
 
   // Auto-prune salesHistory older than 60 days
   const cutoff = Date.now() - SIXTY_DAYS_MS;
@@ -255,13 +283,9 @@ export async function saveAdminAppConfig(cfg: AdminAppConfig): Promise<boolean> 
         },
         { onConflict: "id" },
       );
+      lastGlobalStoreFetchAt = Date.now();
     } catch {}
 
-    try {
-      await supabase.auth.updateUser({
-        data: { toki_admin_config_v2: cleanCfg },
-      });
-    } catch {}
     return true;
   } catch {
     return false;
@@ -276,7 +300,7 @@ export async function submitUserPaymentRequestToCloud(
 ): Promise<boolean> {
   try {
     await recordUserPurchaseHistory(record);
-    const currentCfg = await getAdminAppConfig();
+    const currentCfg = await getAdminAppConfig(true);
     const updatedSales = [
       record,
       ...(currentCfg.salesHistory || []).filter((r) => r.id !== record.id),
@@ -294,21 +318,44 @@ export async function submitUserPaymentRequestToCloud(
 
 /**
  * Called by Admin when clicking "Approve / Active করুন"
+ * Deterministic expiry calculation: NEVER doubles duration if clicked again on an existing request!
  */
 export async function adminApprovePaymentRequestInCloud(
   reqId: string,
   generatedKey: string,
 ): Promise<boolean> {
   try {
-    const currentCfg = await getAdminAppConfig();
-    const updatedSales = (currentCfg.salesHistory || []).map((item) =>
-      item.id === reqId
-        ? { ...item, status: "approved" as const, activationKey: generatedKey }
-        : item,
-    );
+    const currentCfg = await getAdminAppConfig(true);
+    const now = Date.now();
+    let approvedAccCode = "";
+
+    const updatedSales = (currentCfg.salesHistory || []).map((item) => {
+      if (item.id === reqId) {
+        approvedAccCode = item.accountCode.toUpperCase();
+        // Fixed approval timestamp so re-approving the same request NEVER doubles the duration!
+        const baseTime = item.approvedAt || item.createdAt || now;
+        const fixedExpiresAt = baseTime + getPlanDurationMs(item.planType);
+        return {
+          ...item,
+          status: "approved" as const,
+          activationKey: item.activationKey || generatedKey,
+          approvedAt: baseTime,
+          expiresAt: fixedExpiresAt,
+        };
+      }
+      return item;
+    });
+
+    // Clear any older revocation marker for this account if Admin is explicitly approving
+    const nextRevoked = { ...(currentCfg.revokedAccounts || {}) };
+    if (approvedAccCode && nextRevoked[approvedAccCode]) {
+      delete nextRevoked[approvedAccCode];
+    }
+
     const nextCfg: AdminAppConfig = {
       ...currentCfg,
       salesHistory: updatedSales,
+      revokedAccounts: nextRevoked,
     };
     return await saveAdminAppConfig(nextCfg);
   } catch {
@@ -324,7 +371,7 @@ export async function adminCancelOrRevokePurchaseInCloud(
 ): Promise<boolean> {
   try {
     const cleanTarget = reqIdOrAccountCode.trim();
-    const currentCfg = await getAdminAppConfig();
+    const currentCfg = await getAdminAppConfig(true);
     const now = Date.now();
     let targetAccCode = cleanTarget.toUpperCase();
 
@@ -334,7 +381,12 @@ export async function adminCancelOrRevokePurchaseInCloud(
         item.accountCode.toUpperCase() === cleanTarget.toUpperCase()
       ) {
         targetAccCode = item.accountCode.toUpperCase();
-        return { ...item, status: "cancelled" as const, revokedAt: now };
+        return {
+          ...item,
+          status: "cancelled" as const,
+          revokedAt: now,
+          expiresAt: 0,
+        };
       }
       return item;
     });
@@ -375,7 +427,6 @@ export async function recordUserPurchaseHistory(
 ): Promise<PurchaseRecord[]> {
   try {
     const current = await getUserPurchaseHistory();
-    // If redeeming a key manually, also mark any matching pending request for same planType as approved!
     const normalized = current.map((r) => {
       if (
         record.status === "approved" &&
@@ -400,12 +451,21 @@ export async function recordUserPurchaseHistory(
 
 /**
  * Synchronizes User's Pending/Approved/Cancelled Requests with Global Cloud Store
- * & Checks 3-Day Pro Expiry Warning Notification!
+ * Returns { isRevokedNow, authoritativeProExpiry, authoritativeProPlan } so cancelled subscriptions stay cancelled!
  */
 export async function syncUserPurchasesAndProExpiryWithCloud(
   userId: string,
   userEmail: string,
-): Promise<void> {
+  forceCloudCheck: boolean = false,
+): Promise<{
+  isRevokedNow: boolean;
+  authoritativeProExpiry: number | null;
+  authoritativeProPlan: string | null;
+}> {
+  let isRevokedNow = false;
+  let authoritativeProExpiry: number | null = null;
+  let authoritativeProPlan: string | null = null;
+
   try {
     const accountCode = getAccountCodeForUser(userId || userEmail);
     const superAdmin = isSuperAdminEmail(userEmail);
@@ -414,8 +474,10 @@ export async function syncUserPurchasesAndProExpiryWithCloud(
       await FocusLock.setSuperAdminUserEmail(userEmail);
     }
 
-    const cfg = await getAdminAppConfig();
     const localHistory = await getUserPurchaseHistory();
+    const hasPendingLocal = localHistory.some((r) => r.status === "pending");
+
+    const cfg = await getAdminAppConfig(forceCloudCheck || hasPendingLocal);
 
     const appliedRaw = await AsyncStorage.getItem(APPLIED_CLOUD_REQ_IDS_KEY);
     const appliedIds: string[] = appliedRaw ? JSON.parse(appliedRaw) : [];
@@ -426,17 +488,21 @@ export async function syncUserPurchasesAndProExpiryWithCloud(
     let historyChanged = false;
     const updatedLocalHistory = [...localHistory];
 
-    // 1. Check matching requests in global salesHistory for this user
     const userGlobalReqs = (cfg.salesHistory || []).filter(
       (r) =>
         r.accountCode?.toUpperCase() === accountCode.toUpperCase() ||
         (userEmail && r.userEmail?.toLowerCase() === userEmail.toLowerCase()),
     );
 
+    const cloudRevokedAt = cfg.revokedAccounts?.[accountCode.toUpperCase()] || 0;
+
     for (const cReq of userGlobalReqs) {
       const localIdx = updatedLocalHistory.findIndex((l) => l.id === cReq.id);
       if (localIdx >= 0) {
-        if (updatedLocalHistory[localIdx].status !== cReq.status) {
+        if (
+          updatedLocalHistory[localIdx].status !== cReq.status ||
+          updatedLocalHistory[localIdx].expiresAt !== cReq.expiresAt
+        ) {
           updatedLocalHistory[localIdx] = { ...updatedLocalHistory[localIdx], ...cReq };
           historyChanged = true;
         }
@@ -445,42 +511,91 @@ export async function syncUserPurchasesAndProExpiryWithCloud(
         historyChanged = true;
       }
 
-      // Auto-apply newly approved request on user's phone!
-      if (
-        cReq.status === "approved" &&
-        cReq.activationKey &&
-        !appliedIds.includes(cReq.id)
-      ) {
-        if (Platform.OS === "android" && FocusLock?.verifyAndApplyActivationKey) {
-          try {
-            await FocusLock.verifyAndApplyActivationKey(accountCode, cReq.activationKey);
-          } catch {}
+      if (cReq.status === "approved" && (cReq.createdAt || 0) >= cloudRevokedAt) {
+        const isProPlan =
+          cReq.planType === "PRO30" ||
+          cReq.planType === "PRO180" ||
+          cReq.planType === "PRO365";
+        const fixedExpiry =
+          cReq.expiresAt && cReq.expiresAt > 0
+            ? cReq.expiresAt
+            : (cReq.approvedAt || cReq.createdAt || Date.now()) +
+              getPlanDurationMs(cReq.planType);
+
+        if (!appliedIds.includes(cReq.id)) {
+          // First time applying this request (adds bonus pass via native key once)
+          if (
+            cReq.activationKey &&
+            Platform.OS === "android" &&
+            FocusLock?.verifyAndApplyActivationKey
+          ) {
+            try {
+              await FocusLock.verifyAndApplyActivationKey(accountCode, cReq.activationKey);
+            } catch {}
+          }
+          appliedIds.push(cReq.id);
+          await AsyncStorage.setItem(APPLIED_CLOUD_REQ_IDS_KEY, JSON.stringify(appliedIds));
         }
-        appliedIds.push(cReq.id);
-        await AsyncStorage.setItem(APPLIED_CLOUD_REQ_IDS_KEY, JSON.stringify(appliedIds));
+
+        if (isProPlan && fixedExpiry > (authoritativeProExpiry || 0)) {
+          authoritativeProExpiry = fixedExpiry;
+          authoritativeProPlan = cReq.planTitle;
+        }
       }
     }
 
-    // 2. Check if Admin revoked/cancelled this user's subscription
-    const cloudRevokedAt = cfg.revokedAccounts?.[accountCode.toUpperCase()] || 0;
+    // Check if Admin revoked/cancelled this user's subscription
     const lastHandledRevoke = revokedMap[accountCode.toUpperCase()] || 0;
-    if (cloudRevokedAt > lastHandledRevoke && !superAdmin) {
-      if (Platform.OS === "android" && FocusLock?.revokeProSubscriptionNative) {
+    const allCancelledInGlobal =
+      userGlobalReqs.length > 0 &&
+      userGlobalReqs.every((r) => r.status === "cancelled");
+
+    if (
+      !superAdmin &&
+      (cloudRevokedAt > lastHandledRevoke ||
+        (allCancelledInGlobal && authoritativeProExpiry === null))
+    ) {
+      isRevokedNow = true;
+      authoritativeProExpiry = 0;
+      authoritativeProPlan = "Free";
+      if (Platform.OS === "android") {
         try {
-          await FocusLock.revokeProSubscriptionNative(2);
+          if (cloudRevokedAt > lastHandledRevoke && FocusLock?.revokeProSubscriptionNative) {
+            await FocusLock.revokeProSubscriptionNative(2);
+          }
+          if (FocusLock?.setExactProStatusFromCloud) {
+            await FocusLock.setExactProStatusFromCloud(false, 0, "Free");
+          }
         } catch {}
       }
-      revokedMap[accountCode.toUpperCase()] = cloudRevokedAt;
-      await AsyncStorage.setItem(REVOKED_CLOUD_MARKERS_KEY, JSON.stringify(revokedMap));
+      if (cloudRevokedAt > 0) {
+        revokedMap[accountCode.toUpperCase()] = cloudRevokedAt;
+        await AsyncStorage.setItem(REVOKED_CLOUD_MARKERS_KEY, JSON.stringify(revokedMap));
+      }
       for (let i = 0; i < updatedLocalHistory.length; i++) {
         if (updatedLocalHistory[i].status === "approved") {
           updatedLocalHistory[i] = {
             ...updatedLocalHistory[i],
             status: "cancelled",
-            revokedAt: cloudRevokedAt,
+            revokedAt: cloudRevokedAt || Date.now(),
           };
           historyChanged = true;
         }
+      }
+    } else if (
+      !superAdmin &&
+      authoritativeProExpiry !== null &&
+      authoritativeProExpiry > Date.now()
+    ) {
+      // Enforce exact non-doubled expiry from approved request!
+      if (Platform.OS === "android" && FocusLock?.setExactProStatusFromCloud) {
+        try {
+          await FocusLock.setExactProStatusFromCloud(
+            true,
+            authoritativeProExpiry,
+            authoritativeProPlan || "Toki Pro",
+          );
+        } catch {}
       }
     }
 
@@ -491,14 +606,14 @@ export async function syncUserPurchasesAndProExpiryWithCloud(
       );
     }
 
-    // 3. Check if Toki Pro is in its LAST 3 DAYS and send notification once per day!
+    // Check if Toki Pro is in its LAST 3 DAYS and send notification once per day!
     if (Platform.OS === "android" && FocusLock?.getFocusSessionState && !superAdmin) {
       const s = await FocusLock.getFocusSessionState();
       const proExpiresAt = Number(s?.proExpiresAt ?? 0);
       const now = Date.now();
       const remainingMs = proExpiresAt - now;
       if (s?.isPro && remainingMs > 0 && remainingMs <= THREE_DAYS_MS) {
-        const daysLeft = Math.max(1, Math.ceil(remainingMs / (24 * 60 * 60 * 1000)));
+        const daysLeft = Math.max(1, Math.ceil(remainingMs / DAY_MS));
         const todayIso = new Date().toISOString().split("T")[0];
         const lastWarnDate = await AsyncStorage.getItem(PRO_EXPIRY_WARN_DATE_KEY);
         if (lastWarnDate !== todayIso) {
@@ -529,6 +644,8 @@ export async function syncUserPurchasesAndProExpiryWithCloud(
       }
     }
   } catch {}
+
+  return { isRevokedNow, authoritativeProExpiry, authoritativeProPlan };
 }
 
 // ============================================================================
@@ -844,7 +961,7 @@ export async function getInAppNotices(): Promise<AppNoticeItem[]> {
   const initial: AppNoticeItem[] = [
     {
       id: "welcome-1",
-      title: "Toki 2.0 — Focus Lock & Pro Ready 👑",
+      title: "Toki 2.1 — Focus Lock & Pro Ready 👑",
       message:
         "৪৫ মিনিট ডেইলি লকে ৯৯ দিনের স্ট্রিক চ্যালেঞ্জ (৭ দিন ফ্রি প্রো), ২৫+৫ সেশন লক এবং স্মার্ট কন্টাক্ট রিমাইন্ডার প্রস্তুত!",
       timestamp: Date.now() - 3600 * 1000,
@@ -887,7 +1004,7 @@ export async function clearAllInAppNotices(): Promise<void> {
 }
 
 // ============================================================================
-// 100% ACCOUNT-WISE ISOLATION & CLOUD BACKUP ENGINE
+// 100% ACCOUNT-WISE ISOLATION & SMART CLOUD BACKUP ENGINE
 // ============================================================================
 
 export const OFFLINE_SYNC_QUEUE_KEY = "@jnuits_offline_dirty_flag";
@@ -968,6 +1085,10 @@ export async function spendEmergencyPassWithCloudCheck(): Promise<boolean> {
     const nextUsed = localUsed + 1;
     const nextPasses = Math.max(0, Math.min(15, localEarned - nextUsed));
 
+    try {
+      await supabase.auth.getSession();
+    } catch {}
+
     const {
       data: { user },
       error: getError,
@@ -1008,8 +1129,15 @@ export async function spendEmergencyPassWithCloudCheck(): Promise<boolean> {
   }
 }
 
-export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
+export async function syncLocalDataToCloudIfOnline(
+  forceCloudCheck: boolean = false,
+): Promise<boolean> {
   try {
+    // Refresh session token first so offline-to-online transitions never fail getUser()!
+    try {
+      await supabase.auth.getSession();
+    } catch {}
+
     const {
       data: { user: currentUser },
     } = await supabase.auth.getUser();
@@ -1026,9 +1154,10 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
     }
 
     // Sync pending/approved/cancelled requests from public.toki_cloud_store & check 3-day Pro expiry
-    await syncUserPurchasesAndProExpiryWithCloud(
+    const cloudPurchaseSync = await syncUserPurchasesAndProExpiryWithCloud(
       currentUser.id,
       currentUser.email || "",
+      forceCloudCheck,
     );
 
     const superAdmin = isSuperAdminEmail(currentUser.email);
@@ -1147,22 +1276,40 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
     const cloudUsed = cloudBackup.totalPassesUsed ?? 0;
     const cloudLastDate = cloudBackup.lastCompletedDate || "";
     const cloudStreak = cloudBackup.streakDays ?? 0;
+
+    // If revoked by Admin, DO NOT restore old cloudBackup.proExpiresAt!
     const cloudProExpiresAt = superAdmin
       ? 4102444800000
+      : cloudPurchaseSync.isRevokedNow
+      ? 0
+      : cloudPurchaseSync.authoritativeProExpiry !== null
+      ? cloudPurchaseSync.authoritativeProExpiry
       : Number(cloudBackup.proExpiresAt ?? 0);
+
     const cloudProPlanName = superAdmin
       ? "Super Admin Lifetime Pro 👑"
-      : cloudBackup.proPlanName || "";
+      : cloudPurchaseSync.isRevokedNow
+      ? "Free"
+      : cloudPurchaseSync.authoritativeProPlan || cloudBackup.proPlanName || "";
 
-    const mergedEarned = Math.max(nativeLockState.totalPassesEarned, cloudEarned);
+    const mergedEarned = cloudPurchaseSync.isRevokedNow
+      ? nativeLockState.totalPassesEarned
+      : Math.max(nativeLockState.totalPassesEarned, cloudEarned);
     const mergedUsed = Math.max(nativeLockState.totalPassesUsed, cloudUsed);
     const mergedPasses = Math.max(0, Math.min(15, mergedEarned - mergedUsed));
 
     const mergedProExpiresAt = superAdmin
       ? 4102444800000
+      : cloudPurchaseSync.isRevokedNow
+      ? 0
+      : cloudPurchaseSync.authoritativeProExpiry !== null
+      ? cloudPurchaseSync.authoritativeProExpiry
       : Math.max(nativeLockState.proExpiresAt, cloudProExpiresAt);
+
     const mergedProPlanName = superAdmin
       ? "Super Admin Lifetime Pro 👑"
+      : cloudPurchaseSync.isRevokedNow
+      ? "Free"
       : cloudProExpiresAt >= nativeLockState.proExpiresAt && cloudProPlanName
       ? cloudProPlanName
       : nativeLockState.proPlanName;
@@ -1225,6 +1372,18 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
         activeDate,
         mergedYtUsedSeconds,
         mergedYtStudyUsedSeconds,
+        mergedProExpiresAt,
+        mergedProPlanName,
+      );
+    }
+
+    if (
+      Platform.OS === "android" &&
+      FocusLock?.setExactProStatusFromCloud &&
+      !superAdmin
+    ) {
+      await FocusLock.setExactProStatusFromCloud(
+        mergedProExpiresAt > Date.now(),
         mergedProExpiresAt,
         mergedProPlanName,
       );
@@ -1355,6 +1514,10 @@ export async function syncLocalDataToCloudIfOnline(): Promise<boolean> {
 
 export async function restoreCloudBackupAfterGoogleLogin(): Promise<void> {
   try {
+    try {
+      await supabase.auth.getSession();
+    } catch {}
+
     const {
       data: { user },
     } = await supabase.auth.getUser();
@@ -1503,6 +1666,6 @@ export async function restoreCloudBackupAfterGoogleLogin(): Promise<void> {
       }
     }
 
-    await syncLocalDataToCloudIfOnline();
+    await syncLocalDataToCloudIfOnline(true);
   } catch {}
 }
